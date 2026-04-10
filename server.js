@@ -30,6 +30,19 @@ app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 app.use(express.json());
 
+const WORKSHOP_DAY_ORDER_SQL = `
+  CASE dia
+    WHEN 'lunes' THEN 1
+    WHEN 'martes' THEN 2
+    WHEN 'miércoles' THEN 3
+    WHEN 'jueves' THEN 4
+    WHEN 'viernes' THEN 5
+    WHEN 'sábado' THEN 6
+    WHEN 'domingo' THEN 7
+    ELSE 99
+  END
+`;
+
 // ─── CONEXIÓN POSTGRESQL ──────────────────────────────────────────
 // Railway inyecta DATABASE_URL automáticamente.
 // Para desarrollo local: crea un .env con DATABASE_URL=postgresql://user:pass@localhost:5432/leadflow
@@ -106,10 +119,92 @@ async function initDB() {
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
 
+    CREATE TABLE IF NOT EXISTS workshops (
+      id                  TEXT PRIMARY KEY,
+      razon_social        TEXT NOT NULL,
+      nombre_comercial    TEXT NOT NULL,
+      rut                 TEXT,
+      encargado_nombre    TEXT,
+      encargado_email     TEXT,
+      encargado_phone     TEXT,
+      finanzas_nombre     TEXT,
+      finanzas_email      TEXT,
+      finanzas_phone      TEXT,
+      direccion           TEXT,
+      comuna              TEXT,
+      comunas_adicionales JSONB,
+      latitud             NUMERIC,
+      longitud            NUMERIC,
+      maps_url            TEXT,
+      puestos             INTEGER DEFAULT 1,
+      turnos_por_puesto   INTEGER DEFAULT 1,
+      aro_min             INTEGER DEFAULT 13,
+      aro_max             INTEGER DEFAULT 22,
+      instala_runflat     BOOLEAN DEFAULT FALSE,
+      tipos_vehiculo      JSONB,
+      marcas_neumaticos   JSONB,
+      todas_marcas        BOOLEAN DEFAULT TRUE,
+      active              BOOLEAN DEFAULT TRUE,
+      created_at          TIMESTAMPTZ DEFAULT NOW(),
+      updated_at          TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS workshop_schedules (
+      id          TEXT PRIMARY KEY,
+      workshop_id TEXT NOT NULL REFERENCES workshops(id) ON DELETE CASCADE,
+      dia         TEXT NOT NULL,
+      activo      BOOLEAN DEFAULT TRUE,
+      hora_inicio TEXT DEFAULT '09:00',
+      hora_fin    TEXT DEFAULT '18:00',
+      horas       TEXT,
+      created_at  TIMESTAMPTZ DEFAULT NOW(),
+      updated_at  TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_workshop_schedules_workshop_dia
+      ON workshop_schedules(workshop_id, dia);
+
+    CREATE TABLE IF NOT EXISTS workshop_services (
+      id          TEXT PRIMARY KEY,
+      workshop_id TEXT NOT NULL REFERENCES workshops(id) ON DELETE CASCADE,
+      nombre      TEXT NOT NULL,
+      descripcion TEXT,
+      created_at  TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS workshop_prices (
+      id          TEXT PRIMARY KEY,
+      workshop_id TEXT NOT NULL REFERENCES workshops(id) ON DELETE CASCADE,
+      tipo        TEXT NOT NULL,
+      descripcion TEXT,
+      aro_min     INTEGER,
+      aro_max     INTEGER,
+      precio      NUMERIC DEFAULT 0,
+      created_at  TIMESTAMPTZ DEFAULT NOW(),
+      updated_at  TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS workshop_appointments (
+      id          TEXT PRIMARY KEY,
+      workshop_id TEXT NOT NULL REFERENCES workshops(id) ON DELETE CASCADE,
+      lead_id     TEXT REFERENCES leads(id) ON DELETE SET NULL,
+      fecha       DATE NOT NULL,
+      hora        TEXT NOT NULL,
+      puesto      INTEGER DEFAULT 1,
+      notas       TEXT,
+      order_id    TEXT,
+      status      TEXT DEFAULT 'pending',
+      created_at  TIMESTAMPTZ DEFAULT NOW()
+    );
+
     CREATE INDEX IF NOT EXISTS idx_leads_status    ON leads(status);
     CREATE INDEX IF NOT EXISTS idx_leads_channel   ON leads(channel);
     CREATE INDEX IF NOT EXISTS idx_activities_lead ON activities(lead_id);
     CREATE INDEX IF NOT EXISTS idx_tasks_lead      ON tasks(lead_id);
+    CREATE INDEX IF NOT EXISTS idx_workshops_active ON workshops(active);
+    CREATE INDEX IF NOT EXISTS idx_workshop_prices_workshop ON workshop_prices(workshop_id);
+    CREATE INDEX IF NOT EXISTS idx_workshop_services_workshop ON workshop_services(workshop_id);
+    CREATE INDEX IF NOT EXISTS idx_workshop_appointments_workshop_fecha ON workshop_appointments(workshop_id, fecha);
   `);
 
   const { rows } = await query('SELECT COUNT(*) as count FROM leads');
@@ -161,6 +256,115 @@ const asyncHandler = fn => (req, res, next) =>
     console.error('API Error:', err.message);
     res.status(500).json({ error: 'Error interno del servidor', detail: err.message });
   });
+
+const parseBoolean = (value, defaultValue = false) => {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (['true', '1', 'yes', 'si', 'sí', 'on'].includes(normalized)) return true;
+    if (['false', '0', 'no', 'off'].includes(normalized)) return false;
+  }
+  if (value === undefined || value === null) return defaultValue;
+  return Boolean(value);
+};
+
+const parseInteger = (value, defaultValue) => {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : defaultValue;
+};
+
+const parseFloatNumber = (value, defaultValue) => {
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : defaultValue;
+};
+
+const valueOrNull = value => (value === undefined ? null : value);
+
+const normalizeTime = (value, fallback) => {
+  if (value === undefined || value === null || value === '') return fallback;
+  const match = String(value).trim().match(/^([01]\d|2[0-3]):([0-5]\d)/);
+  if (!match) return fallback;
+  return `${match[1]}:${match[2]}`;
+};
+
+const normalizeDia = value => {
+  const normalized = String(value || '').trim().toLowerCase();
+  const dayMap = {
+    monday: 'lunes',
+    mon: 'lunes',
+    lunes: 'lunes',
+    tuesday: 'martes',
+    tue: 'martes',
+    martes: 'martes',
+    wednesday: 'miércoles',
+    wed: 'miércoles',
+    miercoles: 'miércoles',
+    'miércoles': 'miércoles',
+    thursday: 'jueves',
+    thu: 'jueves',
+    jueves: 'jueves',
+    friday: 'viernes',
+    fri: 'viernes',
+    viernes: 'viernes',
+    saturday: 'sábado',
+    sat: 'sábado',
+    sabado: 'sábado',
+    'sábado': 'sábado',
+    sunday: 'domingo',
+    sun: 'domingo',
+    domingo: 'domingo',
+  };
+  return dayMap[normalized] || normalized;
+};
+
+const getScheduleInput = body => body?.schedules || body?.horarios || [];
+
+async function upsertWorkshopSchedules(workshopId, scheduleInput) {
+  const schedules = (Array.isArray(scheduleInput) ? scheduleInput : [])
+    .map(s => ({
+      dia: normalizeDia(s.dia || s.day || s.weekday),
+      activo: parseBoolean(s.activo ?? s.active ?? s.enabled, false),
+      hora_inicio: normalizeTime(s.hora_inicio ?? s.horaInicio ?? s.start_time ?? s.start, '09:00'),
+      hora_fin: normalizeTime(s.hora_fin ?? s.horaFin ?? s.end_time ?? s.end, '18:00'),
+      horas: s.horas || null,
+    }))
+    .filter(s => s.dia);
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    for (const s of schedules) {
+      await client.query(
+        `INSERT INTO workshop_schedules (id, workshop_id, dia, activo, hora_inicio, hora_fin, horas)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)
+         ON CONFLICT (workshop_id,dia)
+         DO UPDATE SET
+           activo=EXCLUDED.activo,
+           hora_inicio=EXCLUDED.hora_inicio,
+           hora_fin=EXCLUDED.hora_fin,
+           horas=EXCLUDED.horas,
+           updated_at=NOW()`,
+        [uuidv4(), workshopId, s.dia, s.activo, s.hora_inicio, s.hora_fin, s.horas]
+      );
+    }
+
+    const { rows } = await client.query(
+      `SELECT * FROM workshop_schedules
+       WHERE workshop_id = $1
+       ORDER BY ${WORKSHOP_DAY_ORDER_SQL}`,
+      [workshopId]
+    );
+
+    await client.query('COMMIT');
+    return rows;
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
 
 // ─── HEALTH CHECK ─────────────────────────────────────────────────
 app.get('/health', (req, res) => {
@@ -396,6 +600,236 @@ app.post('/api/leads/:id/notes', asyncHandler(async (req, res) => {
     [uuidv4(), req.params.id, content]
   );
   res.status(201).json(note);
+}));
+
+// ─── TALLERES ─────────────────────────────────────────────────────
+app.get('/api/workshops', asyncHandler(async (req, res) => {
+  const { search } = req.query;
+  const active = req.query.active ?? 'true';
+  let queryText = `SELECT w.*,
+    COUNT(DISTINCT ws.dia) FILTER (WHERE ws.activo = true) as dias_activos,
+    COUNT(DISTINCT wp.id) as servicios_precios
+    FROM workshops w
+    LEFT JOIN workshop_schedules ws ON ws.workshop_id = w.id
+    LEFT JOIN workshop_prices wp ON wp.workshop_id = w.id
+    WHERE w.active = $1`;
+
+  const params = [parseBoolean(active, true)];
+
+  if (search) {
+    queryText += ` AND (w.nombre_comercial ILIKE $2 OR w.comuna ILIKE $2)`;
+    params.push(`%${search}%`);
+  }
+
+  queryText += ' GROUP BY w.id ORDER BY w.nombre_comercial';
+  const { rows } = await query(queryText, params);
+  res.json(rows);
+}));
+
+app.get('/api/workshops/:id', asyncHandler(async (req, res) => {
+  const [workshop, schedules, services, prices] = await Promise.all([
+    query('SELECT * FROM workshops WHERE id = $1', [req.params.id]),
+    query(`SELECT * FROM workshop_schedules WHERE workshop_id = $1 ORDER BY ${WORKSHOP_DAY_ORDER_SQL}`, [req.params.id]),
+    query('SELECT * FROM workshop_services WHERE workshop_id = $1 ORDER BY nombre', [req.params.id]),
+    query('SELECT * FROM workshop_prices WHERE workshop_id = $1 ORDER BY tipo, aro_min', [req.params.id]),
+  ]);
+
+  if (!workshop.rows[0]) return res.status(404).json({ error: 'Taller no encontrado' });
+  res.json({ ...workshop.rows[0], schedules: schedules.rows, services: services.rows, prices: prices.rows });
+}));
+
+app.post('/api/workshops', asyncHandler(async (req, res) => {
+  const {
+    razon_social, nombre_comercial, rut, encargado_nombre, encargado_email, encargado_phone,
+    finanzas_nombre, finanzas_email, finanzas_phone, direccion, comuna, comunas_adicionales,
+    latitud, longitud, maps_url, puestos, turnos_por_puesto, aro_min, aro_max,
+    instala_runflat, tipos_vehiculo, marcas_neumaticos, todas_marcas,
+  } = req.body;
+
+  if (!nombre_comercial) return res.status(400).json({ error: 'Nombre comercial requerido' });
+
+  const { rows: [workshop] } = await query(
+    `INSERT INTO workshops (id, razon_social, nombre_comercial, rut, encargado_nombre, encargado_email,
+      encargado_phone, finanzas_nombre, finanzas_email, finanzas_phone, direccion, comuna,
+      comunas_adicionales, latitud, longitud, maps_url, puestos, turnos_por_puesto, aro_min, aro_max,
+      instala_runflat, tipos_vehiculo, marcas_neumaticos, todas_marcas)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
+     RETURNING *`,
+    [uuidv4(), razon_social || nombre_comercial, nombre_comercial, rut || null,
+      encargado_nombre || null, encargado_email || null, encargado_phone || null,
+      finanzas_nombre || null, finanzas_email || null, finanzas_phone || null,
+      direccion || null, comuna || null, comunas_adicionales || null,
+      latitud || null, longitud || null, maps_url || null,
+      parseInteger(puestos, 1), parseInteger(turnos_por_puesto, 1),
+      parseInteger(aro_min, 13), parseInteger(aro_max, 22),
+      parseBoolean(instala_runflat, false), tipos_vehiculo || null,
+      marcas_neumaticos || null, parseBoolean(todas_marcas, true)]
+  );
+
+  const scheduleInput = getScheduleInput(req.body);
+  const schedules = scheduleInput.length > 0
+    ? await upsertWorkshopSchedules(workshop.id, scheduleInput)
+    : [];
+
+  res.status(201).json({ ...workshop, schedules });
+}));
+
+app.put('/api/workshops/:id', asyncHandler(async (req, res) => {
+  const payload = req.body || {};
+  const { rows: [current] } = await query('SELECT * FROM workshops WHERE id = $1', [req.params.id]);
+  if (!current) return res.status(404).json({ error: 'Taller no encontrado' });
+
+  const merged = {
+    razon_social: payload.razon_social ?? current.razon_social,
+    nombre_comercial: payload.nombre_comercial ?? current.nombre_comercial,
+    rut: payload.rut ?? current.rut,
+    encargado_nombre: payload.encargado_nombre ?? current.encargado_nombre,
+    encargado_email: payload.encargado_email ?? current.encargado_email,
+    encargado_phone: payload.encargado_phone ?? current.encargado_phone,
+    finanzas_nombre: payload.finanzas_nombre ?? current.finanzas_nombre,
+    finanzas_email: payload.finanzas_email ?? current.finanzas_email,
+    finanzas_phone: payload.finanzas_phone ?? current.finanzas_phone,
+    direccion: payload.direccion ?? current.direccion,
+    comuna: payload.comuna ?? current.comuna,
+    comunas_adicionales: payload.comunas_adicionales ?? current.comunas_adicionales,
+    latitud: payload.latitud ?? current.latitud,
+    longitud: payload.longitud ?? current.longitud,
+    maps_url: payload.maps_url ?? current.maps_url,
+    puestos: payload.puestos ?? current.puestos,
+    turnos_por_puesto: payload.turnos_por_puesto ?? current.turnos_por_puesto,
+    aro_min: payload.aro_min ?? current.aro_min,
+    aro_max: payload.aro_max ?? current.aro_max,
+    instala_runflat: payload.instala_runflat ?? current.instala_runflat,
+    tipos_vehiculo: payload.tipos_vehiculo ?? current.tipos_vehiculo,
+    marcas_neumaticos: payload.marcas_neumaticos ?? current.marcas_neumaticos,
+    todas_marcas: payload.todas_marcas ?? current.todas_marcas,
+    active: payload.active ?? current.active,
+  };
+
+  const { rows: [workshop] } = await query(
+    `UPDATE workshops
+     SET razon_social=$1,nombre_comercial=$2,rut=$3,encargado_nombre=$4,encargado_email=$5,
+         encargado_phone=$6,finanzas_nombre=$7,finanzas_email=$8,finanzas_phone=$9,direccion=$10,
+         comuna=$11,comunas_adicionales=$12,latitud=$13,longitud=$14,maps_url=$15,puestos=$16,
+         turnos_por_puesto=$17,aro_min=$18,aro_max=$19,instala_runflat=$20,tipos_vehiculo=$21,
+         marcas_neumaticos=$22,todas_marcas=$23,active=$24,updated_at=NOW()
+     WHERE id=$25
+     RETURNING *`,
+    [valueOrNull(merged.razon_social), valueOrNull(merged.nombre_comercial), valueOrNull(merged.rut),
+      valueOrNull(merged.encargado_nombre), valueOrNull(merged.encargado_email), valueOrNull(merged.encargado_phone),
+      valueOrNull(merged.finanzas_nombre), valueOrNull(merged.finanzas_email), valueOrNull(merged.finanzas_phone),
+      valueOrNull(merged.direccion), valueOrNull(merged.comuna), valueOrNull(merged.comunas_adicionales),
+      valueOrNull(merged.latitud), valueOrNull(merged.longitud), valueOrNull(merged.maps_url),
+      parseInteger(merged.puestos, 1), parseInteger(merged.turnos_por_puesto, 1),
+      parseInteger(merged.aro_min, 13), parseInteger(merged.aro_max, 22), parseBoolean(merged.instala_runflat, false),
+      valueOrNull(merged.tipos_vehiculo), valueOrNull(merged.marcas_neumaticos), parseBoolean(merged.todas_marcas, true),
+      parseBoolean(merged.active, true), req.params.id]
+  );
+
+  const scheduleInput = getScheduleInput(req.body);
+  if (scheduleInput.length > 0) {
+    await upsertWorkshopSchedules(req.params.id, scheduleInput);
+  }
+
+  res.json(workshop);
+}));
+
+// Horarios
+app.put('/api/workshops/:id/schedules', asyncHandler(async (req, res) => {
+  const { rows } = await query('SELECT id FROM workshops WHERE id = $1', [req.params.id]);
+  if (!rows[0]) return res.status(404).json({ error: 'Taller no encontrado' });
+
+  const schedules = await upsertWorkshopSchedules(req.params.id, getScheduleInput(req.body));
+  res.json({ success: true, schedules });
+}));
+
+// Servicios
+app.post('/api/workshops/:id/services', asyncHandler(async (req, res) => {
+  const { nombre, descripcion } = req.body;
+  const { rows: [service] } = await query(
+    `INSERT INTO workshop_services (id, workshop_id, nombre, descripcion)
+     VALUES ($1,$2,$3,$4) RETURNING *`,
+    [uuidv4(), req.params.id, nombre, descripcion || null]
+  );
+  res.status(201).json(service);
+}));
+
+app.delete('/api/workshops/:id/services/:sid', asyncHandler(async (req, res) => {
+  await query('DELETE FROM workshop_services WHERE id = $1 AND workshop_id = $2', [req.params.sid, req.params.id]);
+  res.json({ success: true });
+}));
+
+// Precios
+app.post('/api/workshops/:id/prices', asyncHandler(async (req, res) => {
+  const { tipo, descripcion, aro_min, aro_max, precio } = req.body;
+  const { rows: [price] } = await query(
+    `INSERT INTO workshop_prices (id, workshop_id, tipo, descripcion, aro_min, aro_max, precio)
+     VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+    [uuidv4(), req.params.id, tipo, descripcion, aro_min || null, aro_max || null, parseFloatNumber(precio, 0)]
+  );
+  res.status(201).json(price);
+}));
+
+app.put('/api/workshops/:id/prices/:pid', asyncHandler(async (req, res) => {
+  const { tipo, descripcion, aro_min, aro_max, precio } = req.body;
+  const { rows: [price] } = await query(
+    `UPDATE workshop_prices
+     SET tipo=$1, descripcion=$2, aro_min=$3, aro_max=$4, precio=$5, updated_at=NOW()
+     WHERE id=$6 AND workshop_id=$7
+     RETURNING *`,
+    [tipo, descripcion, aro_min || null, aro_max || null, parseFloatNumber(precio, 0), req.params.pid, req.params.id]
+  );
+  res.json(price);
+}));
+
+app.delete('/api/workshops/:id/prices/:pid', asyncHandler(async (req, res) => {
+  await query('DELETE FROM workshop_prices WHERE id = $1 AND workshop_id = $2', [req.params.pid, req.params.id]);
+  res.json({ success: true });
+}));
+
+// Agenda
+app.get('/api/workshops/:id/appointments', asyncHandler(async (req, res) => {
+  const { fecha_inicio, fecha_fin } = req.query;
+  let queryText = `SELECT wa.*, l.name as lead_name, l.phone as lead_phone
+    FROM workshop_appointments wa
+    LEFT JOIN leads l ON l.id = wa.lead_id
+    WHERE wa.workshop_id = $1`;
+  const params = [req.params.id];
+
+  if (fecha_inicio) {
+    queryText += ` AND wa.fecha >= $${params.length + 1}`;
+    params.push(fecha_inicio);
+  }
+  if (fecha_fin) {
+    queryText += ` AND wa.fecha <= $${params.length + 1}`;
+    params.push(fecha_fin);
+  }
+  queryText += ' ORDER BY wa.fecha, wa.hora';
+
+  const { rows } = await query(queryText, params);
+  res.json(rows);
+}));
+
+app.post('/api/workshops/:id/appointments', asyncHandler(async (req, res) => {
+  const { lead_id, fecha, hora, puesto, notas, order_id } = req.body;
+  const { rows: [appointment] } = await query(
+    `INSERT INTO workshop_appointments (id, workshop_id, lead_id, fecha, hora, puesto, notas, order_id)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+    [uuidv4(), req.params.id, lead_id || null, fecha, hora, parseInteger(puesto, 1), notas || null, order_id || null]
+  );
+  res.status(201).json(appointment);
+}));
+
+app.patch('/api/workshops/:id/appointments/:aid/status', asyncHandler(async (req, res) => {
+  const { status } = req.body;
+  const { rows: [appointment] } = await query(
+    `UPDATE workshop_appointments
+     SET status=$1
+     WHERE id=$2 AND workshop_id=$3
+     RETURNING *`,
+    [status, req.params.aid, req.params.id]
+  );
+  res.json(appointment);
 }));
 
 // ─── WEBHOOK AGENTES ──────────────────────────────────────────────
