@@ -278,6 +278,8 @@ const parseFloatNumber = (value, defaultValue) => {
   return Number.isFinite(parsed) ? parsed : defaultValue;
 };
 
+const valueOrNull = value => (value === undefined ? null : value);
+
 const normalizeTime = (value, fallback) => {
   if (value === undefined || value === null || value === '') return fallback;
   const match = String(value).trim().match(/^([01]\d|2[0-3]):([0-5]\d)/);
@@ -673,12 +675,36 @@ app.post('/api/workshops', asyncHandler(async (req, res) => {
 }));
 
 app.put('/api/workshops/:id', asyncHandler(async (req, res) => {
-  const {
-    razon_social, nombre_comercial, rut, encargado_nombre, encargado_email, encargado_phone,
-    finanzas_nombre, finanzas_email, finanzas_phone, direccion, comuna, comunas_adicionales,
-    latitud, longitud, maps_url, puestos, turnos_por_puesto, aro_min, aro_max,
-    instala_runflat, tipos_vehiculo, marcas_neumaticos, todas_marcas, active,
-  } = req.body;
+  const payload = req.body || {};
+  const { rows: [current] } = await query('SELECT * FROM workshops WHERE id = $1', [req.params.id]);
+  if (!current) return res.status(404).json({ error: 'Taller no encontrado' });
+
+  const merged = {
+    razon_social: payload.razon_social ?? current.razon_social,
+    nombre_comercial: payload.nombre_comercial ?? current.nombre_comercial,
+    rut: payload.rut ?? current.rut,
+    encargado_nombre: payload.encargado_nombre ?? current.encargado_nombre,
+    encargado_email: payload.encargado_email ?? current.encargado_email,
+    encargado_phone: payload.encargado_phone ?? current.encargado_phone,
+    finanzas_nombre: payload.finanzas_nombre ?? current.finanzas_nombre,
+    finanzas_email: payload.finanzas_email ?? current.finanzas_email,
+    finanzas_phone: payload.finanzas_phone ?? current.finanzas_phone,
+    direccion: payload.direccion ?? current.direccion,
+    comuna: payload.comuna ?? current.comuna,
+    comunas_adicionales: payload.comunas_adicionales ?? current.comunas_adicionales,
+    latitud: payload.latitud ?? current.latitud,
+    longitud: payload.longitud ?? current.longitud,
+    maps_url: payload.maps_url ?? current.maps_url,
+    puestos: payload.puestos ?? current.puestos,
+    turnos_por_puesto: payload.turnos_por_puesto ?? current.turnos_por_puesto,
+    aro_min: payload.aro_min ?? current.aro_min,
+    aro_max: payload.aro_max ?? current.aro_max,
+    instala_runflat: payload.instala_runflat ?? current.instala_runflat,
+    tipos_vehiculo: payload.tipos_vehiculo ?? current.tipos_vehiculo,
+    marcas_neumaticos: payload.marcas_neumaticos ?? current.marcas_neumaticos,
+    todas_marcas: payload.todas_marcas ?? current.todas_marcas,
+    active: payload.active ?? current.active,
+  };
 
   const { rows: [workshop] } = await query(
     `UPDATE workshops
@@ -689,16 +715,16 @@ app.put('/api/workshops/:id', asyncHandler(async (req, res) => {
          marcas_neumaticos=$22,todas_marcas=$23,active=$24,updated_at=NOW()
      WHERE id=$25
      RETURNING *`,
-    [razon_social, nombre_comercial, rut || null, encargado_nombre || null, encargado_email || null,
-      encargado_phone || null, finanzas_nombre || null, finanzas_email || null, finanzas_phone || null,
-      direccion || null, comuna || null, comunas_adicionales || null, latitud || null, longitud || null,
-      maps_url || null, parseInteger(puestos, 1), parseInteger(turnos_por_puesto, 1),
-      parseInteger(aro_min, 13), parseInteger(aro_max, 22), parseBoolean(instala_runflat, false),
-      tipos_vehiculo || null, marcas_neumaticos || null, parseBoolean(todas_marcas, true),
-      parseBoolean(active, true), req.params.id]
+    [valueOrNull(merged.razon_social), valueOrNull(merged.nombre_comercial), valueOrNull(merged.rut),
+      valueOrNull(merged.encargado_nombre), valueOrNull(merged.encargado_email), valueOrNull(merged.encargado_phone),
+      valueOrNull(merged.finanzas_nombre), valueOrNull(merged.finanzas_email), valueOrNull(merged.finanzas_phone),
+      valueOrNull(merged.direccion), valueOrNull(merged.comuna), valueOrNull(merged.comunas_adicionales),
+      valueOrNull(merged.latitud), valueOrNull(merged.longitud), valueOrNull(merged.maps_url),
+      parseInteger(merged.puestos, 1), parseInteger(merged.turnos_por_puesto, 1),
+      parseInteger(merged.aro_min, 13), parseInteger(merged.aro_max, 22), parseBoolean(merged.instala_runflat, false),
+      valueOrNull(merged.tipos_vehiculo), valueOrNull(merged.marcas_neumaticos), parseBoolean(merged.todas_marcas, true),
+      parseBoolean(merged.active, true), req.params.id]
   );
-
-  if (!workshop) return res.status(404).json({ error: 'Taller no encontrado' });
 
   const scheduleInput = getScheduleInput(req.body);
   if (scheduleInput.length > 0) {
