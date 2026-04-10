@@ -2,11 +2,32 @@ const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
 const { v4: uuidv4 } = require('uuid');
+const dotenv = require('dotenv');
+
+dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+const DEMO_EMAIL = process.env.DEMO_EMAIL || 'admin@leadflow.com';
+const DEMO_PASSWORD = process.env.DEMO_PASSWORD || 'Admin1234!';
+const DEMO_TOKEN = process.env.DEMO_TOKEN || 'leadflow-demo-token';
+const allowedOrigins = (process.env.CORS_ORIGINS || process.env.FRONTEND_URL || '')
+  .split(',')
+  .map(origin => origin.trim())
+  .filter(Boolean);
 
-app.use(cors());
+const corsOptions = {
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.length === 0 || allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error('Origen no permitido por CORS'));
+  },
+  credentials: true,
+};
+
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 app.use(express.json());
 
 // ─── CONEXIÓN POSTGRESQL ──────────────────────────────────────────
@@ -23,10 +44,12 @@ const pool = new Pool({
 });
 
 const query = (text, params) => pool.query(text, params);
+let dbReady = false;
+let dbInitError = null;
 
-pool.connect()
-  .then(client => { console.log('PostgreSQL conectado'); client.release(); })
-  .catch(err => { console.error('Error DB:', err.message); process.exit(1); });
+if (!process.env.DATABASE_URL) {
+  console.warn('DATABASE_URL no está configurada. El backend quedará en modo degradado hasta conectarse a una DB.');
+}
 
 // ─── INICIALIZAR TABLAS ───────────────────────────────────────────
 async function initDB() {
@@ -140,10 +163,66 @@ const asyncHandler = fn => (req, res, next) =>
   });
 
 // ─── HEALTH CHECK ─────────────────────────────────────────────────
-app.get('/health', asyncHandler(async (req, res) => {
-  await query('SELECT 1');
-  res.json({ status: 'ok', db: 'connected', timestamp: new Date().toISOString() });
-}));
+app.get('/health', (req, res) => {
+  res.status(dbReady ? 200 : 503).json({
+    status: dbReady ? 'ok' : 'degraded',
+    db: dbReady ? 'connected' : 'disconnected',
+    detail: dbInitError,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// ─── AUTH DEMO ────────────────────────────────────────────────────
+const demoUser = {
+  email: DEMO_EMAIL,
+  name: 'LeadFlow Admin',
+  role: 'admin',
+};
+
+const sendAuthPayload = res => res.json({ token: DEMO_TOKEN, user: demoUser });
+
+const loginHandler = (req, res) => {
+  const { email, password } = req.body || {};
+
+  if (!email || !password) {
+    return res.status(400).json({ error: 'Email y contraseña son requeridos' });
+  }
+
+  if (email.toLowerCase() !== DEMO_EMAIL.toLowerCase() || password !== DEMO_PASSWORD) {
+    return res.status(401).json({ error: 'Credenciales inválidas' });
+  }
+
+  return sendAuthPayload(res);
+};
+
+app.post('/api/auth/login', loginHandler);
+app.post('/api/login', loginHandler);
+
+app.get('/api/auth/me', (req, res) => {
+  const authHeader = req.headers.authorization || '';
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+
+  if (token !== DEMO_TOKEN) {
+    return res.status(401).json({ error: 'No autorizado' });
+  }
+
+  return res.json({ user: demoUser });
+});
+
+app.use('/api', (req, res, next) => {
+  if (req.path === '/login' || req.path === '/auth/login' || req.path === '/auth/me') {
+    return next();
+  }
+
+  if (!dbReady) {
+    return res.status(503).json({
+      error: 'Servicio temporalmente no disponible',
+      detail: dbInitError || 'La base de datos aún no está disponible',
+    });
+  }
+
+  return next();
+});
 
 // ─── DASHBOARD ────────────────────────────────────────────────────
 app.get('/api/dashboard', asyncHandler(async (req, res) => {
@@ -367,9 +446,22 @@ app.post('/api/webhook/agent', asyncHandler(async (req, res) => {
 }));
 
 // ─── START ────────────────────────────────────────────────────────
-initDB().then(() => {
-  app.listen(PORT, () => console.log(`LeadFlow API en puerto ${PORT} [${process.env.NODE_ENV || 'development'}]`));
-}).catch(err => {
-  console.error('Error al iniciar:', err);
-  process.exit(1);
+async function bootstrapDatabase() {
+  try {
+    await query('SELECT 1');
+    console.log('PostgreSQL conectado');
+    await initDB();
+    dbReady = true;
+    dbInitError = null;
+  } catch (err) {
+    dbReady = false;
+    dbInitError = err.message || 'Error desconocido';
+    console.error('Error DB:', dbInitError);
+    setTimeout(bootstrapDatabase, 10000);
+  }
+}
+
+app.listen(PORT, () => {
+  console.log(`LeadFlow API en puerto ${PORT} [${process.env.NODE_ENV || 'development'}]`);
+  bootstrapDatabase();
 });
