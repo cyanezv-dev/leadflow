@@ -368,6 +368,36 @@ async function initDB() {
   `);
 
   await query(`
+    CREATE TABLE IF NOT EXISTS competitor_config (
+      id              SERIAL PRIMARY KEY,
+      competitor      TEXT UNIQUE NOT NULL,
+      search_url      TEXT,
+      price_selector  TEXT,
+      link_selector   TEXT,
+      active          BOOLEAN DEFAULT TRUE,
+      updated_at      TIMESTAMPTZ DEFAULT NOW()
+    );
+  `);
+
+  // Seed default competitor configs
+  const DEFAULTS = [
+    { competitor: 'Supermercado del Neumático', search_url: 'https://www.superneumatico.cl/search?q={query}',              price_selector: '.price--highlight, .price__current, [class*="price"]' },
+    { competitor: 'ChileNeumatico',             search_url: 'https://www.chileneumatico.cl/?s={query}',                   price_selector: '.woocommerce-Price-amount bdi, ins .woocommerce-Price-amount' },
+    { competitor: 'Copec',                      search_url: 'https://www.copecneumaticos.cl/search?q={query}',            price_selector: '.price__sale .price-item--sale, .price__regular .price-item--regular, [class*="price"]' },
+    { competitor: 'Dacsa',                      search_url: 'https://www.dacsa.cl/search?type=product&q={query}',         price_selector: '.price .money, .product-price .money, [class*="price"] .money' },
+    { competitor: 'León',                       search_url: 'https://www.leon.cl/search?q={query}',                       price_selector: '.woocommerce-Price-amount bdi, .price ins .woocommerce-Price-amount, [class*="price"]' },
+    { competitor: 'Llantas del Pacífico',       search_url: 'https://www.llantasdelpacifico.cl/search?type=product&q={query}', price_selector: '.price .money, [class*="price"] .money' },
+  ];
+  for (const d of DEFAULTS) {
+    await query(
+      `INSERT INTO competitor_config (competitor, search_url, price_selector, active)
+       VALUES ($1,$2,$3,TRUE)
+       ON CONFLICT (competitor) DO NOTHING`,
+      [d.competitor, d.search_url, d.price_selector]
+    );
+  }
+
+  await query(`
     CREATE TABLE IF NOT EXISTS competitor_prices (
       id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       product_id   UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
@@ -1202,8 +1232,37 @@ app.get('/api/orders', asyncHandler(async (req, res) => {
   res.json(rows);
 }));
 
+// ── CONFIGURACIÓN DE COMPETIDORES ─────────────────────────────
+const { scrapeProduct, scrapeWithConfig, COMPETITOR_NAMES } = require('./scrapers');
+
+app.get('/api/competitor-config', asyncHandler(async (req, res) => {
+  const { rows } = await query(`SELECT * FROM competitor_config ORDER BY competitor`);
+  res.json(rows);
+}));
+
+app.put('/api/competitor-config/:competitor', asyncHandler(async (req, res) => {
+  const { competitor } = req.params;
+  const { search_url, price_selector, link_selector, active } = req.body;
+  const { rows } = await query(
+    `UPDATE competitor_config
+     SET search_url=$1, price_selector=$2, link_selector=$3, active=$4, updated_at=NOW()
+     WHERE competitor=$5
+     RETURNING *`,
+    [search_url, price_selector, link_selector ?? null, active ?? true, decodeURIComponent(competitor)]
+  );
+  if (!rows.length) return res.status(404).json({ error: 'Competidor no encontrado' });
+  res.json(rows[0]);
+}));
+
+// Test en vivo: scrape una URL específica con un selector CSS
+app.post('/api/competitor-config/test', asyncHandler(async (req, res) => {
+  const { url, price_selector, link_selector } = req.body;
+  if (!url) return res.status(400).json({ error: 'url requerida' });
+  const result = await scrapeWithConfig({ url, price_selector, link_selector });
+  res.json(result);
+}));
+
 // ── COMPETENCIA ───────────────────────────────────────────────
-const { scrapeProduct, COMPETITOR_NAMES } = require('./scrapers');
 
 // Listado de productos con precios de competencia (paginado)
 app.get('/api/competitor-prices/filters', asyncHandler(async (req, res) => {
