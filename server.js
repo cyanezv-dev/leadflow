@@ -3023,11 +3023,14 @@ app.put('/api/workshops/:id/prices', asyncHandler(async (req, res) => {
   const rows = [];
   for (const p of prices) {
     if (!p.precio) continue;
+    const tipo = p.tipo || 'montaje'
+    const aro  = p.aro || null
+    const desc = p.descripcion || (tipo === 'montaje' ? `Montaje aro ${aro}` : `Balanceo aro ${aro}`)
     const { rows: [row] } = await query(
       `INSERT INTO workshop_prices (id, workshop_id, tipo, descripcion, aro_min, aro_max, precio)
        VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
-      [require('crypto').randomUUID(), wid, p.tipo || 'montaje', p.descripcion || null,
-       p.aro || null, p.aro || null, parseFloat(p.precio) || 0]
+      [require('crypto').randomUUID(), wid, tipo, desc,
+       aro, aro, parseFloat(p.precio) || 0]
     );
     rows.push(row);
   }
