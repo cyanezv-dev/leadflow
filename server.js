@@ -385,6 +385,33 @@ async function initDB() {
   `);
 
   await query(`
+    CREATE TABLE IF NOT EXISTS inventory_sources (
+      id                   TEXT PRIMARY KEY DEFAULT gen_random_uuid()::TEXT,
+      product_id           TEXT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+      tipo                 TEXT NOT NULL,
+      nombre               TEXT NOT NULL,
+      ubicacion            TEXT,
+      comuna               TEXT,
+      lat                  NUMERIC,
+      lng                  NUMERIC,
+      cantidad             INTEGER DEFAULT 0,
+      tiempo_entrega_horas INTEGER DEFAULT 24,
+      prioridad            INTEGER DEFAULT 50,
+      permite_instalacion  BOOLEAN DEFAULT FALSE,
+      permite_retiro       BOOLEAN DEFAULT FALSE,
+      permite_despacho     BOOLEAN DEFAULT TRUE,
+      activo               BOOLEAN DEFAULT TRUE,
+      workshop_id          TEXT REFERENCES workshops(id) ON DELETE SET NULL,
+      notas                TEXT,
+      created_at           TIMESTAMPTZ DEFAULT NOW(),
+      updated_at           TIMESTAMPTZ DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_inv_sources_product ON inventory_sources(product_id);
+    CREATE INDEX IF NOT EXISTS idx_inv_sources_tipo    ON inventory_sources(tipo);
+    CREATE INDEX IF NOT EXISTS idx_inv_sources_activo  ON inventory_sources(activo);
+  `);
+
+  await query(`
     CREATE TABLE IF NOT EXISTS competitor_config (
       id              SERIAL PRIMARY KEY,
       competitor      TEXT UNIQUE NOT NULL,
@@ -1359,6 +1386,168 @@ app.post('/api/competitor-config/test', asyncHandler(async (req, res) => {
   res.json(result);
 }));
 
+// ── INVENTORY SOURCES ─────────────────────────────────────────
+// Prioridad comercial: bodega(10) > sucursal(20) > taller(30) > proveedor(40) > taller_instalacion(50)
+const TIPO_PRIORIDAD_BASE = {
+  bodega: 10, sucursal: 20, taller: 30, proveedor: 40, taller_instalacion: 50
+};
+
+function calcularPrioridadFinal(source) {
+  const base = TIPO_PRIORIDAD_BASE[source.tipo] || 50;
+  return base + (source.prioridad || 50) / 100;
+}
+
+async function getAvailability(productId) {
+  const { rows } = await query(
+    `SELECT * FROM inventory_sources WHERE product_id=$1 AND activo=true ORDER BY prioridad ASC`,
+    [productId]
+  );
+  if (rows.length === 0) return null;
+
+  const activas = rows.filter(s => s.cantidad > 0);
+  const sorted  = activas.sort((a, b) =>
+    calcularPrioridadFinal(a) - calcularPrioridadFinal(b)
+  );
+
+  return {
+    disponible:       sorted.length > 0,
+    stock_total:      activas.reduce((s, r) => s + (r.cantidad || 0), 0),
+    fuente_optima:    sorted[0] || null,
+    fuentes:          rows,
+    fuentes_activas:  sorted,
+  };
+}
+
+// GET /api/inventory-sources — lista (filtrable por product_id, tipo)
+app.get('/api/inventory-sources', asyncHandler(async (req, res) => {
+  const { product_id, tipo, page = 1, limit = 50 } = req.query;
+  let q = `SELECT s.*, p.name as product_name, p.brand as product_brand
+    FROM inventory_sources s
+    LEFT JOIN products p ON p.id = s.product_id
+    WHERE 1=1`;
+  const params = [];
+  if (product_id) { params.push(product_id); q += ` AND s.product_id=$${params.length}`; }
+  if (tipo)       { params.push(tipo);       q += ` AND s.tipo=$${params.length}`; }
+  q += ` ORDER BY s.tipo ASC, s.prioridad ASC`;
+  const offset = (parseInt(page) - 1) * parseInt(limit);
+  params.push(parseInt(limit)); params.push(offset);
+  q += ` LIMIT $${params.length - 1} OFFSET $${params.length}`;
+  const { rows } = await query(q, params);
+  res.json(rows);
+}));
+
+// GET /api/inventory-sources/summary — resumen por tipo
+app.get('/api/inventory-sources/summary', asyncHandler(async (req, res) => {
+  const { rows } = await query(`
+    SELECT tipo,
+      COUNT(*)          AS total_fuentes,
+      SUM(cantidad)     AS stock_total,
+      COUNT(CASE WHEN activo=true AND cantidad>0 THEN 1 END) AS fuentes_con_stock
+    FROM inventory_sources
+    GROUP BY tipo ORDER BY tipo
+  `);
+  res.json(rows);
+}));
+
+// GET /api/inventory-sources/:id
+app.get('/api/inventory-sources/:id', asyncHandler(async (req, res) => {
+  const { rows: [s] } = await query('SELECT * FROM inventory_sources WHERE id=$1', [req.params.id]);
+  if (!s) return res.status(404).json({ error: 'Fuente no encontrada' });
+  res.json(s);
+}));
+
+// POST /api/inventory-sources
+app.post('/api/inventory-sources', asyncHandler(async (req, res) => {
+  const {
+    product_id, tipo, nombre, ubicacion, comuna, lat, lng,
+    cantidad = 0, tiempo_entrega_horas = 24, prioridad = 50,
+    permite_instalacion = false, permite_retiro = false, permite_despacho = true,
+    activo = true, workshop_id, notas
+  } = req.body;
+  if (!product_id || !tipo || !nombre)
+    return res.status(400).json({ error: 'product_id, tipo y nombre son requeridos' });
+  const { rows: [s] } = await query(
+    `INSERT INTO inventory_sources
+      (product_id, tipo, nombre, ubicacion, comuna, lat, lng, cantidad, tiempo_entrega_horas,
+       prioridad, permite_instalacion, permite_retiro, permite_despacho, activo, workshop_id, notas)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
+    [product_id, tipo, nombre, ubicacion||null, comuna||null, lat||null, lng||null,
+     parseInt(cantidad)||0, parseInt(tiempo_entrega_horas)||24, parseInt(prioridad)||50,
+     !!permite_instalacion, !!permite_retiro, !!permite_despacho,
+     activo!==false, workshop_id||null, notas||null]
+  );
+  res.status(201).json(s);
+}));
+
+// PUT /api/inventory-sources/:id
+app.put('/api/inventory-sources/:id', asyncHandler(async (req, res) => {
+  const allowed = ['tipo','nombre','ubicacion','comuna','lat','lng','cantidad',
+    'tiempo_entrega_horas','prioridad','permite_instalacion','permite_retiro',
+    'permite_despacho','activo','workshop_id','notas'];
+  const fields = Object.keys(req.body).filter(k => allowed.includes(k));
+  if (fields.length === 0) return res.status(400).json({ error: 'Sin campos válidos' });
+  const sets = fields.map((f, i) => `${f}=$${i + 1}`).join(', ');
+  const vals = fields.map(f => req.body[f]);
+  vals.push(req.params.id);
+  const { rows: [s] } = await query(
+    `UPDATE inventory_sources SET ${sets}, updated_at=NOW() WHERE id=$${vals.length} RETURNING *`,
+    vals
+  );
+  res.json(s);
+}));
+
+// DELETE /api/inventory-sources/:id
+app.delete('/api/inventory-sources/:id', asyncHandler(async (req, res) => {
+  await query('DELETE FROM inventory_sources WHERE id=$1', [req.params.id]);
+  res.json({ success: true });
+}));
+
+// GET /api/products/:id/inventory-sources — fuentes de un producto específico
+app.get('/api/products/:id/inventory-sources', asyncHandler(async (req, res) => {
+  const { rows } = await query(
+    `SELECT * FROM inventory_sources WHERE product_id=$1 ORDER BY prioridad ASC`,
+    [req.params.id]
+  );
+  res.json(rows);
+}));
+
+// GET /api/products/:id/availability — disponibilidad priorizada de un producto
+app.get('/api/products/:id/availability', asyncHandler(async (req, res) => {
+  const av = await getAvailability(req.params.id);
+  if (!av) {
+    const { rows: [p] } = await query('SELECT stock FROM products WHERE id=$1', [req.params.id]);
+    return res.json({
+      disponible: (p?.stock || 0) > 0,
+      stock_total: p?.stock || 0,
+      fuente_optima: p?.stock > 0 ? { tipo: 'bodega', nombre: 'Stock general', cantidad: p.stock, tiempo_entrega_horas: 24, permite_despacho: true, permite_retiro: true, permite_instalacion: false } : null,
+      fuentes: [],
+      fuentes_activas: [],
+      source: 'legacy'
+    });
+  }
+  res.json({ ...av, source: 'inventory_sources' });
+}));
+
+// POST /api/inventory-sources/migrate — migra products.stock a fuente bodega
+app.post('/api/inventory-sources/migrate', asyncHandler(async (req, res) => {
+  const { rows: products } = await query(
+    `SELECT p.id, p.name, p.brand, p.stock
+     FROM products p
+     WHERE p.stock > 0
+     AND NOT EXISTS (SELECT 1 FROM inventory_sources s WHERE s.product_id = p.id AND s.tipo = 'bodega')`
+  );
+  let migrated = 0;
+  for (const p of products) {
+    await query(
+      `INSERT INTO inventory_sources (product_id, tipo, nombre, cantidad, tiempo_entrega_horas, prioridad, permite_retiro, permite_despacho, activo)
+       VALUES ($1,'bodega','Bodega Principal',$2,4,10,true,true,true)`,
+      [p.id, p.stock]
+    );
+    migrated++;
+  }
+  res.json({ migrated, total_products: products.length });
+}));
+
 // ── COMPETENCIA ───────────────────────────────────────────────
 
 // Listado de productos con precios de competencia (paginado)
@@ -1567,8 +1756,38 @@ app.get('/api/catalog', asyncHandler(async (req, res) => {
   ]);
 
   const total = parseInt(countResult.rows[0]?.total || 0);
+  let products = dataResult.rows;
+
+  // Si se pide ?availability=true, enriquecer cada producto con fuentes de disponibilidad
+  if (req.query.availability === 'true' && products.length > 0) {
+    const ids = products.map(p => p.id);
+    const { rows: sources } = await query(
+      `SELECT * FROM inventory_sources WHERE product_id = ANY($1) AND activo=true ORDER BY prioridad ASC`,
+      [ids]
+    );
+    const sourcesByProduct = {};
+    for (const s of sources) {
+      if (!sourcesByProduct[s.product_id]) sourcesByProduct[s.product_id] = [];
+      sourcesByProduct[s.product_id].push(s);
+    }
+    products = products.map(p => {
+      const fuentes = sourcesByProduct[p.id] || [];
+      const activas = fuentes.filter(s => s.cantidad > 0)
+        .sort((a, b) => calcularPrioridadFinal(a) - calcularPrioridadFinal(b));
+      return {
+        ...p,
+        availability: {
+          disponible:    activas.length > 0 || p.stock > 0,
+          stock_total:   activas.reduce((s, r) => s + (r.cantidad || 0), 0) || p.stock,
+          fuente_optima: activas[0] || null,
+          fuentes_count: fuentes.length,
+        }
+      };
+    });
+  }
+
   res.json({
-    products: dataResult.rows,
+    products,
     total,
     page: parseInt(page),
     limit: parseInt(limit),
