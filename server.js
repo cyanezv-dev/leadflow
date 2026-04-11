@@ -368,6 +368,12 @@ async function initDB() {
   `);
 
   await query(`
+    ALTER TABLE quotes ADD COLUMN IF NOT EXISTS pdf_url  TEXT;
+    ALTER TABLE quotes ADD COLUMN IF NOT EXISTS nro_cot  TEXT;
+    ALTER TABLE quotes ADD COLUMN IF NOT EXISTS source   TEXT DEFAULT 'manual';
+  `);
+
+  await query(`
     CREATE TABLE IF NOT EXISTS competitor_config (
       id              SERIAL PRIMARY KEY,
       competitor      TEXT UNIQUE NOT NULL,
@@ -910,6 +916,65 @@ app.post('/api/webhook/agent', asyncHandler(async (req, res) => {
   }
 
   res.json({ success: true, lead_id: lead.id });
+}));
+
+// ── WEBHOOK COTIZACIÓN (AGENTE) ────────────────────────────────
+// Recibe la cotización generada por el agente y la asocia al lead
+// Body: { phone, nro_cot, pdf_url, productos: [{ titulo, marca, medida, precioOferta, precioNormal, cantidad }] }
+app.post('/api/webhook/quote', asyncHandler(async (req, res) => {
+  const { phone, nro_cot, pdf_url, productos = [] } = req.body;
+  if (!phone) return res.status(400).json({ error: 'phone requerido' });
+
+  // Buscar lead por teléfono
+  const { rows: existing } = await query(
+    'SELECT * FROM leads WHERE phone = $1 LIMIT 1', [phone]
+  );
+  if (existing.length === 0) return res.status(404).json({ error: 'Lead no encontrado' });
+  const lead = existing[0];
+
+  // Calcular total de la cotización
+  const subtotal = productos.reduce((acc, p) => {
+    const qty   = parseInt(p.cantidad) || 1;
+    const price = parseInt(p.precioOferta) || parseInt(p.precioNormal) || 0;
+    return acc + qty * price;
+  }, 0);
+  const iva   = Math.round(subtotal * 0.19);
+  const total = subtotal + iva;
+
+  // Insertar cotización
+  const { rows: [quote] } = await query(
+    `INSERT INTO quotes (lead_id, status, iva_rate, total, notes, pdf_url, nro_cot, source)
+     VALUES ($1,'enviada',19,$2,$3,$4,$5,'agente') RETURNING *`,
+    [lead.id, total, pdf_url ? 'Cotización enviada por WhatsApp' : null, pdf_url || null, nro_cot || null]
+  );
+
+  // Insertar ítems
+  for (let i = 0; i < productos.length; i++) {
+    const p   = productos[i];
+    const qty = parseInt(p.cantidad) || 1;
+    const unitPrice = parseInt(p.precioOferta) || parseInt(p.precioNormal) || 0;
+    await query(
+      `INSERT INTO quote_items (quote_id, product, description, quantity, unit_price, total, ord)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      [quote.id, p.titulo || p.marca, p.medida || null, qty, unitPrice, qty * unitPrice, i]
+    );
+  }
+
+  // Actualizar estimated_value del lead si el total es mayor
+  await query(
+    `UPDATE leads SET estimated_value = GREATEST(estimated_value, $1), updated_at = NOW() WHERE id = $2`,
+    [total, lead.id]
+  );
+
+  // Registrar actividad
+  await query(
+    `INSERT INTO activities (id, lead_id, type, content, channel, direction)
+     VALUES ($1,$2,'Cotización',$3,'WhatsApp','outbound')`,
+    [require('crypto').randomUUID(), lead.id,
+     `Cotización ${nro_cot || quote.id} enviada por WhatsApp${pdf_url ? ': ' + pdf_url : ''}`]
+  );
+
+  res.status(201).json({ success: true, quote_id: quote.id, lead_id: lead.id, total });
 }));
 
 // ── CONTACTOS ─────────────────────────────────────────────────
