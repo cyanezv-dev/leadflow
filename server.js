@@ -3015,6 +3015,25 @@ app.delete('/api/workshops/:id/services/:sid', asyncHandler(async (req, res) => 
 }));
 
 // Precios
+// Bulk upsert de precios (array de { tipo, aro, precio })
+app.put('/api/workshops/:id/prices', asyncHandler(async (req, res) => {
+  const { prices = [] } = req.body;
+  const wid = req.params.id;
+  await query('DELETE FROM workshop_prices WHERE workshop_id=$1', [wid]);
+  const rows = [];
+  for (const p of prices) {
+    if (!p.precio) continue;
+    const { rows: [row] } = await query(
+      `INSERT INTO workshop_prices (id, workshop_id, tipo, descripcion, aro_min, aro_max, precio)
+       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+      [require('crypto').randomUUID(), wid, p.tipo || 'montaje', p.descripcion || null,
+       p.aro || null, p.aro || null, parseFloat(p.precio) || 0]
+    );
+    rows.push(row);
+  }
+  res.json(rows);
+}));
+
 app.post('/api/workshops/:id/prices', asyncHandler(async (req, res) => {
   const { tipo, descripcion, aro_min, aro_max, precio } = req.body;
   const { rows: [p] } = await query(
