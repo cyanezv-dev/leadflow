@@ -374,6 +374,17 @@ async function initDB() {
   `);
 
   await query(`
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS oc_proveedor       TEXT;
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS nro_orden_proveedor TEXT;
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS factura_proveedor   TEXT;
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS tipo_despacho       TEXT;
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS nro_seguimiento     TEXT;
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS tipo_entrega        TEXT;
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS notas_seguimiento   TEXT;
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS updated_at          TIMESTAMPTZ DEFAULT NOW();
+  `);
+
+  await query(`
     CREATE TABLE IF NOT EXISTS competitor_config (
       id              SERIAL PRIMARY KEY,
       competitor      TEXT UNIQUE NOT NULL,
@@ -1282,8 +1293,25 @@ app.get('/api/leads/:id/orders', asyncHandler(async (req, res) => {
 app.patch('/api/orders/:id/status', asyncHandler(async (req, res) => {
   const { status } = req.body;
   const { rows: [order] } = await query(
-    'UPDATE orders SET status=$1 WHERE id=$2 RETURNING *',
+    'UPDATE orders SET status=$1, updated_at=NOW() WHERE id=$2 RETURNING *',
     [status, req.params.id]
+  );
+  res.json(order);
+}));
+
+app.patch('/api/orders/:id', asyncHandler(async (req, res) => {
+  const allowed = [
+    'status', 'oc_proveedor', 'nro_orden_proveedor', 'factura_proveedor',
+    'tipo_despacho', 'nro_seguimiento', 'tipo_entrega', 'notas_seguimiento'
+  ];
+  const fields = Object.keys(req.body).filter(k => allowed.includes(k));
+  if (fields.length === 0) return res.status(400).json({ error: 'Sin campos válidos' });
+  const sets = fields.map((f, i) => `${f}=$${i + 1}`).join(', ');
+  const vals = fields.map(f => req.body[f]);
+  vals.push(req.params.id);
+  const { rows: [order] } = await query(
+    `UPDATE orders SET ${sets}, updated_at=NOW() WHERE id=$${vals.length} RETURNING *`,
+    vals
   );
   res.json(order);
 }));
