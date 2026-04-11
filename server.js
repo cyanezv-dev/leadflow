@@ -1207,18 +1207,20 @@ const { scrapeProduct, COMPETITOR_NAMES } = require('./scrapers');
 
 // Listado de productos con precios de competencia (paginado)
 app.get('/api/competitor-prices/filters', asyncHandler(async (req, res) => {
-  const [brandsRes, medidasRes] = await Promise.all([
+  const [brandsRes, medidasRes, arosRes] = await Promise.all([
     query(`SELECT DISTINCT brand FROM products WHERE active = TRUE AND brand IS NOT NULL AND brand != '' ORDER BY brand`),
     query(`SELECT DISTINCT pv.field_value as medida FROM products p JOIN product_values pv ON pv.product_id = p.id AND pv.field_key = 'medida' WHERE p.active = TRUE AND pv.field_value IS NOT NULL AND pv.field_value != '' ORDER BY pv.field_value`),
+    query(`SELECT DISTINCT (regexp_match(pv.field_value, '[Rr](\\d+)'))[1]::integer as aro FROM products p JOIN product_values pv ON pv.product_id = p.id AND pv.field_key = 'medida' WHERE p.active = TRUE AND pv.field_value ~ '[Rr]\\d+' ORDER BY aro`),
   ]);
   res.json({
     brands: brandsRes.rows.map(r => r.brand),
     medidas: medidasRes.rows.map(r => r.medida),
+    aros: arosRes.rows.map(r => r.aro).filter(Boolean),
   });
 }));
 
 app.get('/api/competitor-prices', asyncHandler(async (req, res) => {
-  const { search = '', brand = '', medida = '', page = 1, limit = 30 } = req.query;
+  const { search = '', brand = '', medida = '', aro = '', page = 1, limit = 30 } = req.query;
   const offset = (parseInt(page) - 1) * parseInt(limit);
   const params = [];
   let where = `p.active = TRUE`;
@@ -1233,6 +1235,11 @@ app.get('/api/competitor-prices', asyncHandler(async (req, res) => {
   if (medida) {
     params.push(`%${medida}%`);
     where += ` AND pv.field_value ILIKE $${params.length}`;
+  }
+  if (aro) {
+    params.push(`%R${aro}%`);
+    params.push(`%R0${aro}%`);
+    where += ` AND (pv.field_value ILIKE $${params.length - 1} OR pv.field_value ILIKE $${params.length})`;
   }
 
   const countQ = `
@@ -1281,7 +1288,7 @@ app.get('/api/competitor-prices', asyncHandler(async (req, res) => {
     page: parseInt(page),
     limit: parseInt(limit),
     competitors: COMPETITOR_NAMES,
-    filters: { search, brand, medida },
+    filters: { search, brand, medida, aro },
   });
 }));
 
