@@ -1,0 +1,9 @@
+node_modules/
+.env
+.env.*
+!.env.example
+ecosystem.config.js
+ecosystem.config.js.save
+uploads/
+.logs/
+*.log
