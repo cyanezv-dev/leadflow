@@ -2827,6 +2827,46 @@ app.get('/api/settings/google-key', (req, res) => {
   res.json({ key: process.env.GOOGLE_PLACES_API_KEY || '' });
 });
 
+// ── PLACES AUTOCOMPLETE PROXY (New Places API v1) ─────────────
+app.get('/api/places/autocomplete', asyncHandler(async (req, res) => {
+  const { input } = req.query;
+  if (!input || input.length < 2) return res.json({ suggestions: [] });
+  const key = process.env.GOOGLE_PLACES_API_KEY;
+  if (!key) return res.status(500).json({ error: 'Google API key no configurada' });
+  const referer = req.headers.origin || req.headers.referer || process.env.FRONTEND_URL || 'http://localhost:4001';
+  const resp = await fetch('https://places.googleapis.com/v1/places:autocomplete', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Goog-Api-Key': key,
+      'X-Goog-FieldMask': 'suggestions.placePrediction.text,suggestions.placePrediction.placeId',
+      'Referer': referer,
+      'Origin': referer,
+    },
+    body: JSON.stringify({ input, includedRegionCodes: ['cl'], languageCode: 'es' }),
+  });
+  const data = await resp.json();
+  res.json(data);
+}));
+
+app.get('/api/places/details', asyncHandler(async (req, res) => {
+  const { place_id } = req.query;
+  if (!place_id) return res.status(400).json({ error: 'place_id requerido' });
+  const key = process.env.GOOGLE_PLACES_API_KEY;
+  if (!key) return res.status(500).json({ error: 'Google API key no configurada' });
+  const referer = req.headers.origin || req.headers.referer || process.env.FRONTEND_URL || 'http://localhost:4001';
+  const resp = await fetch(`https://places.googleapis.com/v1/places/${place_id}`, {
+    headers: {
+      'X-Goog-Api-Key': key,
+      'X-Goog-FieldMask': 'formattedAddress,location',
+      'Referer': referer,
+      'Origin': referer,
+    },
+  });
+  const data = await resp.json();
+  res.json(data);
+}));
+
 // ── ANÁLISIS DE NEUMÁTICO POR IMAGEN ─────────────────────────
 const uploadTireImage = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10*1024*1024 } });
 
