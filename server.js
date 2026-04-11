@@ -1354,15 +1354,13 @@ app.get('/api/competitor-prices', asyncHandler(async (req, res) => {
 // Scrape un producto específico
 app.post('/api/competitor-prices/scrape/:productId', asyncHandler(async (req, res) => {
   const { productId } = req.params;
-  const { rows: [product] } = await query(
-    `SELECT p.*, pv.field_value as medida
-     FROM products p
-     LEFT JOIN product_values pv ON pv.product_id = p.id AND pv.field_key = 'medida'
-     WHERE p.id = $1`, [productId]
-  );
+  const [{ rows: [product] }, { rows: configs }] = await Promise.all([
+    query(`SELECT p.*, pv.field_value as medida FROM products p LEFT JOIN product_values pv ON pv.product_id = p.id AND pv.field_key = 'medida' WHERE p.id = $1`, [productId]),
+    query(`SELECT * FROM competitor_config WHERE active = TRUE`),
+  ]);
   if (!product) return res.status(404).json({ error: 'Producto no encontrado' });
 
-  const results = await scrapeProduct(product.brand, product.medida || product.name);
+  const results = await scrapeProduct(product.brand, product.medida || product.name, configs);
   const saved = [];
   for (const r of results) {
     await query(
@@ -1384,16 +1382,14 @@ app.post('/api/competitor-prices/scrape-batch', asyncHandler(async (req, res) =>
     return res.status(400).json({ error: 'product_ids requerido' });
 
   const ids = product_ids.slice(0, 10);
-  const { rows: products } = await query(
-    `SELECT p.id, p.brand, p.name, pv.field_value as medida
-     FROM products p
-     LEFT JOIN product_values pv ON pv.product_id = p.id AND pv.field_key = 'medida'
-     WHERE p.id = ANY($1)`, [ids]
-  );
+  const [{ rows: products }, { rows: configs }] = await Promise.all([
+    query(`SELECT p.id, p.brand, p.name, pv.field_value as medida FROM products p LEFT JOIN product_values pv ON pv.product_id = p.id AND pv.field_key = 'medida' WHERE p.id = ANY($1)`, [ids]),
+    query(`SELECT * FROM competitor_config WHERE active = TRUE`),
+  ]);
 
   const allResults = {};
   await Promise.all(products.map(async (product) => {
-    const results = await scrapeProduct(product.brand, product.medida || product.name);
+    const results = await scrapeProduct(product.brand, product.medida || product.name, configs);
     allResults[product.id] = results;
     for (const r of results) {
       await query(

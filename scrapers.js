@@ -1,6 +1,4 @@
 // ── Scrapers de Competencia ───────────────────────────────────
-// Cada scraper recibe { brand, medida } y retorna { price, url, in_stock }
-
 const fetch = (...args) => import('node-fetch').then(m => m.default(...args));
 const cheerio = require('cheerio');
 
@@ -10,154 +8,111 @@ const HEADERS = {
   'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
 };
 
-async function fetchHtml(url, extraHeaders = {}) {
-  const res = await fetch(url, { headers: { ...HEADERS, ...extraHeaders }, timeout: 12000 });
+const COMPETITOR_NAMES = [
+  'Supermercado del Neumático',
+  'ChileNeumatico',
+  'Copec',
+  'Dacsa',
+  'León',
+  'Llantas del Pacífico',
+];
+
+async function fetchHtml(url) {
+  const res = await fetch(url, { headers: HEADERS, timeout: 15000 });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.text();
 }
 
 function parsePrice(str) {
   if (!str) return null;
+  // Remove currency symbols, dots as thousands separator, keep digits
+  const clean = str.replace(/[^\d,]/g, '').replace(',', '.');
   const num = parseInt(str.replace(/[^\d]/g, ''), 10);
-  return isNaN(num) ? null : num;
+  return isNaN(num) || num < 500 ? null : num;
 }
 
-// ── 1. Supermercado del Neumático ─────────────────────────────
-async function scrapeSuperneumatico(brand, medida) {
+// Extraer precio de un HTML usando un selector CSS configurable
+function extractPrice($, selector) {
+  if (!selector) return null;
+  const selectors = selector.split(',').map(s => s.trim());
+  for (const sel of selectors) {
+    let price = null;
+    $(sel).each((_, el) => {
+      if (price) return;
+      const text = $(el).text().trim();
+      const p = parsePrice(text);
+      if (p && p > 500 && p < 100000000) price = p;
+    });
+    if (price) return price;
+  }
+  return null;
+}
+
+// Scrape con configuración dinámica (URL + selector CSS)
+async function scrapeWithConfig({ url, price_selector, link_selector }) {
+  const startMs = Date.now();
   try {
-    const q = encodeURIComponent(`${medida} ${brand}`);
-    const url = `https://www.superneumatico.cl/search?q=${q}`;
     const html = await fetchHtml(url);
     const $ = cheerio.load(html);
-    let price = null;
-    let inStock = false;
-    $('[class*="price"], .price, [data-price]').first().each((_, el) => {
-      price = parsePrice($(el).text());
-    });
-    if (!price) {
-      const priceText = $('body').text().match(/\$[\s]*[\d\.]+/);
-      if (priceText) price = parsePrice(priceText[0]);
+    const price = extractPrice($, price_selector);
+
+    // Extraer URL del primer resultado si hay selector de link
+    let productUrl = url;
+    if (link_selector) {
+      const href = $(link_selector).first().attr('href');
+      if (href) productUrl = href.startsWith('http') ? href : new URL(href, url).href;
     }
-    inStock = price !== null;
-    return { price, url, in_stock: inStock };
+
+    // Mostrar contexto del precio para depuración
+    const priceContext = price_selector
+      ? $(price_selector.split(',')[0].trim()).first().text().trim().slice(0, 80)
+      : '';
+
+    return {
+      price,
+      url: productUrl,
+      in_stock: price !== null,
+      ms: Date.now() - startMs,
+      price_context: priceContext,
+      html_length: html.length,
+      error: null,
+    };
   } catch (e) {
-    return { price: null, url: `https://www.superneumatico.cl/search?q=${encodeURIComponent(medida)}`, in_stock: false };
+    return {
+      price: null,
+      url,
+      in_stock: false,
+      ms: Date.now() - startMs,
+      error: e.message,
+    };
   }
 }
 
-// ── 2. ChileNeumatico ─────────────────────────────────────────
-async function scrapeChileneumatico(brand, medida) {
-  try {
-    const q = encodeURIComponent(`${medida} ${brand}`);
-    const url = `https://www.chileneumatico.cl/?s=${q}`;
-    const html = await fetchHtml(url);
-    const $ = cheerio.load(html);
-    let price = null;
-    $('.woocommerce-Price-amount, .price bdi, ins .woocommerce-Price-amount').first().each((_, el) => {
-      price = parsePrice($(el).text());
-    });
-    const inStock = price !== null;
-    return { price, url, in_stock: inStock };
-  } catch (e) {
-    return { price: null, url: `https://www.chileneumatico.cl/?s=${encodeURIComponent(medida)}`, in_stock: false };
-  }
-}
+// Scrape todos los competidores para un producto usando configs de BD
+async function scrapeProduct(brand, medida, configs = []) {
+  const query = `${medida || ''} ${brand || ''}`.trim();
 
-// ── 3. Copec ──────────────────────────────────────────────────
-async function scrapeCopec(brand, medida) {
-  try {
-    const q = encodeURIComponent(`${medida} ${brand}`);
-    const url = `https://www.copecneumaticos.cl/search?q=${q}`;
-    const html = await fetchHtml(url);
-    const $ = cheerio.load(html);
-    let price = null;
-    $('[class*="price"]').first().each((_, el) => {
-      const p = parsePrice($(el).text());
-      if (p && p > 1000) price = p;
-    });
-    return { price, url, in_stock: price !== null };
-  } catch (e) {
-    return { price: null, url: `https://www.copecneumaticos.cl/search?q=${encodeURIComponent(medida)}`, in_stock: false };
-  }
-}
-
-// ── 4. Dacsa ──────────────────────────────────────────────────
-async function scrapeDacsa(brand, medida) {
-  try {
-    const q = encodeURIComponent(`${medida} ${brand}`);
-    const url = `https://www.dacsa.cl/search?type=product&q=${q}`;
-    const html = await fetchHtml(url);
-    const $ = cheerio.load(html);
-    let price = null;
-    $('.price, [class*="price"] .money, .product-price').first().each((_, el) => {
-      const p = parsePrice($(el).text());
-      if (p && p > 1000) price = p;
-    });
-    return { price, url, in_stock: price !== null };
-  } catch (e) {
-    return { price: null, url: `https://www.dacsa.cl/search?type=product&q=${encodeURIComponent(medida)}`, in_stock: false };
-  }
-}
-
-// ── 5. León ───────────────────────────────────────────────────
-async function scrapeLeon(brand, medida) {
-  try {
-    const q = encodeURIComponent(`${medida} ${brand}`);
-    const url = `https://www.leon.cl/search?q=${q}`;
-    const html = await fetchHtml(url);
-    const $ = cheerio.load(html);
-    let price = null;
-    $('[class*="price"], .woocommerce-Price-amount').first().each((_, el) => {
-      const p = parsePrice($(el).text());
-      if (p && p > 1000) price = p;
-    });
-    return { price, url, in_stock: price !== null };
-  } catch (e) {
-    return { price: null, url: `https://www.leon.cl/search?q=${encodeURIComponent(medida)}`, in_stock: false };
-  }
-}
-
-// ── 6. Llantas del Pacífico ───────────────────────────────────
-async function scrapeLlantasPacifico(brand, medida) {
-  try {
-    const q = encodeURIComponent(`${medida} ${brand}`);
-    const url = `https://www.llantasdelpacifico.cl/search?type=product&q=${q}`;
-    const html = await fetchHtml(url);
-    const $ = cheerio.load(html);
-    let price = null;
-    $('[class*="price"] .money, .price').first().each((_, el) => {
-      const p = parsePrice($(el).text());
-      if (p && p > 1000) price = p;
-    });
-    return { price, url, in_stock: price !== null };
-  } catch (e) {
-    return { price: null, url: `https://www.llantasdelpacifico.cl/search?type=product&q=${encodeURIComponent(medida)}`, in_stock: false };
-  }
-}
-
-const SCRAPERS = {
-  'Supermercado del Neumático': scrapeSuperneumatico,
-  'ChileNeumatico':             scrapeChileneumatico,
-  'Copec':                      scrapeCopec,
-  'Dacsa':                      scrapeDacsa,
-  'León':                       scrapeLeon,
-  'Llantas del Pacífico':       scrapeLlantasPacifico,
-};
-
-const COMPETITOR_NAMES = Object.keys(SCRAPERS);
-
-async function scrapeProduct(brand, medida) {
   const results = await Promise.allSettled(
     COMPETITOR_NAMES.map(async (name) => {
-      const data = await SCRAPERS[name](brand || '', medida || '');
-      return { competitor: name, ...data };
+      const cfg = configs.find(c => c.competitor === name);
+      if (!cfg || !cfg.active || !cfg.search_url) {
+        return { competitor: name, price: null, url: cfg?.search_url || null, in_stock: false };
+      }
+      const url = cfg.search_url.replace('{query}', encodeURIComponent(query));
+      const result = await scrapeWithConfig({
+        url,
+        price_selector: cfg.price_selector,
+        link_selector: cfg.link_selector,
+      });
+      return { competitor: name, ...result };
     })
   );
+
   return results.map((r, i) =>
     r.status === 'fulfilled'
       ? r.value
-      : { competitor: COMPETITOR_NAMES[i], price: null, url: null, in_stock: false }
+      : { competitor: COMPETITOR_NAMES[i], price: null, url: null, in_stock: false, error: r.reason?.message }
   );
 }
 
-module.exports = { scrapeProduct, COMPETITOR_NAMES };
+module.exports = { scrapeProduct, scrapeWithConfig, COMPETITOR_NAMES };
