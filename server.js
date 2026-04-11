@@ -925,11 +925,15 @@ app.post('/api/webhook/quote', asyncHandler(async (req, res) => {
   const { phone, nro_cot, pdf_url, productos = [] } = req.body;
   if (!phone) return res.status(400).json({ error: 'phone requerido' });
 
-  // Buscar lead por teléfono
+  // Normalizar teléfono (quitar prefijo whatsapp: y espacios)
+  const phoneClean = phone.replace(/^whatsapp:/i, '').trim();
+
+  // Buscar lead por teléfono (con y sin prefijo whatsapp:)
   const { rows: existing } = await query(
-    'SELECT * FROM leads WHERE phone = $1 LIMIT 1', [phone]
+    `SELECT * FROM leads WHERE phone = $1 OR phone = $2 OR phone = $3 LIMIT 1`,
+    [phoneClean, 'whatsapp:' + phoneClean, phone]
   );
-  if (existing.length === 0) return res.status(404).json({ error: 'Lead no encontrado' });
+  if (existing.length === 0) return res.status(404).json({ error: 'Lead no encontrado', phone: phoneClean });
   const lead = existing[0];
 
   // Calcular total de la cotización
