@@ -1,0 +1,31 @@
+
+## Sesión 2026-04-09 — Módulos nuevos
+
+### MÓDULOS AGREGADOS
+- **Panel Atención** (/attention) — búsqueda de clientes, conversación WhatsApp, resumen IA (caché diario), productos por medida, talleres cercanos con distancia, costos totales
+- **Analizar neumático** — modal dentro del panel de atención, sube foto, IA detecta medida y datos, muestra alternativas por tier, genera cotización
+- **Talleres** (/workshops) — CRUD completo con 7 pestañas, Google Places para dirección, horarios por hora, servicios, precios por tipo/aro
+- **Reglas de negocio / Tiempos de entrega** (/delivery-rules) — configuración por región con excepciones por comuna, 346 comunas de Chile
+
+### TABLAS NUEVAS
+- workshops, workshop_schedules, workshop_services, workshop_prices, workshop_appointments
+- delivery_rules
+- comunas_chile (346 comunas)
+
+### CAMBIOS EN BD
+- leads: columnas ai_summary, ai_summary_date, address, lat, lng
+- workshops: latitud/longitud NUMERIC(12,8)
+
+### ENDPOINTS NUEVOS
+- POST /api/attention/summary (con caché diario)
+- GET /api/attention/workshops (con distancia haversine, filtro 100km)
+- POST /api/attention/analyze-tire (análisis imagen con Claude)
+- GET/POST/PUT/DELETE /api/delivery-rules
+- GET /api/delivery-rules/lookup
+- GET /api/comunas
+- GET /api/settings/google-key
+- PATCH /api/leads/:id/address
+
+### CONFIGURACIÓN
+- GOOGLE_PLACES_API_KEY en ecosystem.config.js
+- Google Maps script en index.html (v=beta, libraries=places)
