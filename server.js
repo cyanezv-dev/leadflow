@@ -2984,6 +2984,15 @@ app.put('/api/workshops/:id', asyncHandler(async (req, res) => {
   res.json(w);
 }));
 
+app.delete('/api/workshops/:id', asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  await query('DELETE FROM workshop_prices WHERE workshop_id=$1', [id]);
+  await query('DELETE FROM workshop_services WHERE workshop_id=$1', [id]);
+  await query('DELETE FROM workshop_schedules WHERE workshop_id=$1', [id]);
+  await query('DELETE FROM workshops WHERE id=$1', [id]);
+  res.json({ success: true });
+}));
+
 // Horarios
 app.put('/api/workshops/:id/schedules', asyncHandler(async (req, res) => {
   const { schedules } = req.body;
