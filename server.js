@@ -367,6 +367,21 @@ async function initDB() {
     CREATE INDEX IF NOT EXISTS idx_quote_items_quote   ON quote_items(quote_id);
   `);
 
+  await query(`
+    CREATE TABLE IF NOT EXISTS competitor_prices (
+      id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      product_id   UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+      competitor   TEXT NOT NULL,
+      price        NUMERIC,
+      url          TEXT,
+      in_stock     BOOLEAN DEFAULT TRUE,
+      scraped_at   TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE(product_id, competitor)
+    );
+    CREATE INDEX IF NOT EXISTS idx_competitor_prices_product ON competitor_prices(product_id);
+    CREATE INDEX IF NOT EXISTS idx_competitor_prices_comp    ON competitor_prices(competitor);
+  `);
+
   // Seed admin user if no users exist
   const { rows: userRows } = await query('SELECT COUNT(*) as count FROM users');
   if (parseInt(userRows[0].count) === 0) {
@@ -1185,6 +1200,147 @@ app.get('/api/orders', asyncHandler(async (req, res) => {
   q += ' ORDER BY o.created_at DESC';
   const { rows } = await query(q, params);
   res.json(rows);
+}));
+
+// ── COMPETENCIA ───────────────────────────────────────────────
+const { scrapeProduct, COMPETITOR_NAMES } = require('./scrapers');
+
+// Listado de productos con precios de competencia (paginado)
+app.get('/api/competitor-prices/filters', asyncHandler(async (req, res) => {
+  const [brandsRes, medidasRes] = await Promise.all([
+    query(`SELECT DISTINCT brand FROM products WHERE active = TRUE AND brand IS NOT NULL AND brand != '' ORDER BY brand`),
+    query(`SELECT DISTINCT pv.field_value as medida FROM products p JOIN product_values pv ON pv.product_id = p.id AND pv.field_key = 'medida' WHERE p.active = TRUE AND pv.field_value IS NOT NULL AND pv.field_value != '' ORDER BY pv.field_value`),
+  ]);
+  res.json({
+    brands: brandsRes.rows.map(r => r.brand),
+    medidas: medidasRes.rows.map(r => r.medida),
+  });
+}));
+
+app.get('/api/competitor-prices', asyncHandler(async (req, res) => {
+  const { search = '', brand = '', medida = '', page = 1, limit = 30 } = req.query;
+  const offset = (parseInt(page) - 1) * parseInt(limit);
+  const params = [];
+  let where = `p.active = TRUE`;
+  if (search) {
+    params.push(`%${search}%`);
+    where += ` AND (p.name ILIKE $${params.length} OR p.brand ILIKE $${params.length} OR pv.field_value ILIKE $${params.length})`;
+  }
+  if (brand) {
+    params.push(brand);
+    where += ` AND p.brand = $${params.length}`;
+  }
+  if (medida) {
+    params.push(`%${medida}%`);
+    where += ` AND pv.field_value ILIKE $${params.length}`;
+  }
+
+  const countQ = `
+    SELECT COUNT(DISTINCT p.id) as total
+    FROM products p
+    LEFT JOIN product_values pv ON pv.product_id = p.id AND pv.field_key = 'medida'
+    WHERE ${where}
+  `;
+  const productsQ = `
+    SELECT DISTINCT p.id, p.name, p.brand, p.price_normal, p.price_offer, p.photo_url, p.stock,
+           pv.field_value as medida
+    FROM products p
+    LEFT JOIN product_values pv ON pv.product_id = p.id AND pv.field_key = 'medida'
+    WHERE ${where}
+    ORDER BY p.brand, p.name
+    LIMIT $${params.length + 1} OFFSET $${params.length + 2}
+  `;
+
+  const [countRes, productsRes] = await Promise.all([
+    query(countQ, params),
+    query(productsQ, [...params, parseInt(limit), offset]),
+  ]);
+
+  const productIds = productsRes.rows.map(p => p.id);
+  let competitorMap = {};
+  if (productIds.length > 0) {
+    const pricesRes = await query(
+      `SELECT product_id, competitor, price, url, in_stock, scraped_at
+       FROM competitor_prices WHERE product_id = ANY($1)`,
+      [productIds]
+    );
+    pricesRes.rows.forEach(r => {
+      if (!competitorMap[r.product_id]) competitorMap[r.product_id] = {};
+      competitorMap[r.product_id][r.competitor] = r;
+    });
+  }
+
+  const products = productsRes.rows.map(p => ({
+    ...p,
+    competitor_prices: competitorMap[p.id] || {},
+  }));
+
+  res.json({
+    products,
+    total: parseInt(countRes.rows[0].total),
+    page: parseInt(page),
+    limit: parseInt(limit),
+    competitors: COMPETITOR_NAMES,
+    filters: { search, brand, medida },
+  });
+}));
+
+// Scrape un producto específico
+app.post('/api/competitor-prices/scrape/:productId', asyncHandler(async (req, res) => {
+  const { productId } = req.params;
+  const { rows: [product] } = await query(
+    `SELECT p.*, pv.field_value as medida
+     FROM products p
+     LEFT JOIN product_values pv ON pv.product_id = p.id AND pv.field_key = 'medida'
+     WHERE p.id = $1`, [productId]
+  );
+  if (!product) return res.status(404).json({ error: 'Producto no encontrado' });
+
+  const results = await scrapeProduct(product.brand, product.medida || product.name);
+  const saved = [];
+  for (const r of results) {
+    await query(
+      `INSERT INTO competitor_prices (product_id, competitor, price, url, in_stock, scraped_at)
+       VALUES ($1,$2,$3,$4,$5,NOW())
+       ON CONFLICT (product_id, competitor)
+       DO UPDATE SET price=$3, url=$4, in_stock=$5, scraped_at=NOW()`,
+      [productId, r.competitor, r.price, r.url, r.in_stock]
+    );
+    saved.push(r);
+  }
+  res.json({ product_id: productId, results: saved });
+}));
+
+// Scrape múltiples productos en batch (hasta 10 a la vez)
+app.post('/api/competitor-prices/scrape-batch', asyncHandler(async (req, res) => {
+  const { product_ids } = req.body;
+  if (!Array.isArray(product_ids) || product_ids.length === 0)
+    return res.status(400).json({ error: 'product_ids requerido' });
+
+  const ids = product_ids.slice(0, 10);
+  const { rows: products } = await query(
+    `SELECT p.id, p.brand, p.name, pv.field_value as medida
+     FROM products p
+     LEFT JOIN product_values pv ON pv.product_id = p.id AND pv.field_key = 'medida'
+     WHERE p.id = ANY($1)`, [ids]
+  );
+
+  const allResults = {};
+  await Promise.all(products.map(async (product) => {
+    const results = await scrapeProduct(product.brand, product.medida || product.name);
+    allResults[product.id] = results;
+    for (const r of results) {
+      await query(
+        `INSERT INTO competitor_prices (product_id, competitor, price, url, in_stock, scraped_at)
+         VALUES ($1,$2,$3,$4,$5,NOW())
+         ON CONFLICT (product_id, competitor)
+         DO UPDATE SET price=$3, url=$4, in_stock=$5, scraped_at=NOW()`,
+        [product.id, r.competitor, r.price, r.url, r.in_stock]
+      );
+    }
+  }));
+
+  res.json({ scraped: Object.keys(allResults).length, results: allResults });
 }));
 
 // ── CATÁLOGO ──────────────────────────────────────────────────
