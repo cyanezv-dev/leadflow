@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
@@ -30,19 +31,28 @@ pool.connect()
 
 // ─── INICIALIZAR TABLAS ───────────────────────────────────────────
 async function initDB() {
+  await query(`CREATE EXTENSION IF NOT EXISTS pgcrypto`);
+
   await query(`
     CREATE TABLE IF NOT EXISTS leads (
       id              TEXT PRIMARY KEY,
       name            TEXT NOT NULL,
+      last_name       TEXT,
       company         TEXT,
+      company_rut     TEXT,
       email           TEXT,
       phone           TEXT,
+      rut             TEXT,
+      job_title       TEXT,
       channel         TEXT DEFAULT 'Web',
       status          TEXT DEFAULT 'Nuevo',
       priority        TEXT DEFAULT 'Media',
       estimated_value NUMERIC DEFAULT 0,
       notes           TEXT,
       agent           TEXT,
+      address         TEXT,
+      lat             NUMERIC,
+      lng             NUMERIC,
       created_at      TIMESTAMPTZ DEFAULT NOW(),
       updated_at      TIMESTAMPTZ DEFAULT NOW()
     );
@@ -83,11 +93,289 @@ async function initDB() {
       created_at TIMESTAMPTZ DEFAULT NOW()
     );
 
-    CREATE INDEX IF NOT EXISTS idx_leads_status    ON leads(status);
-    CREATE INDEX IF NOT EXISTS idx_leads_channel   ON leads(channel);
-    CREATE INDEX IF NOT EXISTS idx_activities_lead ON activities(lead_id);
-    CREATE INDEX IF NOT EXISTS idx_tasks_lead      ON tasks(lead_id);
+    CREATE TABLE IF NOT EXISTS users (
+      id            TEXT PRIMARY KEY DEFAULT gen_random_uuid()::TEXT,
+      name          TEXT NOT NULL,
+      email         TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      role          TEXT DEFAULT 'agent',
+      active        BOOLEAN DEFAULT TRUE,
+      created_at    TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS settings (
+      key        TEXT PRIMARY KEY,
+      value      TEXT,
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS quotes (
+      id          TEXT PRIMARY KEY DEFAULT gen_random_uuid()::TEXT,
+      lead_id     TEXT NOT NULL REFERENCES leads(id) ON DELETE CASCADE,
+      status      TEXT DEFAULT 'borrador',
+      iva_rate    NUMERIC DEFAULT 19,
+      total       NUMERIC DEFAULT 0,
+      valid_until DATE,
+      notes       TEXT,
+      created_at  TIMESTAMPTZ DEFAULT NOW(),
+      updated_at  TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS quote_items (
+      id          TEXT PRIMARY KEY DEFAULT gen_random_uuid()::TEXT,
+      quote_id    TEXT NOT NULL REFERENCES quotes(id) ON DELETE CASCADE,
+      product     TEXT,
+      description TEXT,
+      quantity    NUMERIC DEFAULT 1,
+      unit_price  NUMERIC DEFAULT 0,
+      total       NUMERIC DEFAULT 0,
+      ord         INTEGER DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS orders (
+      id              TEXT PRIMARY KEY,
+      lead_id         TEXT REFERENCES leads(id) ON DELETE SET NULL,
+      nro_orden       TEXT,
+      marca           TEXT,
+      modelo          TEXT,
+      medida          TEXT,
+      cantidad        INTEGER,
+      precio_unitario NUMERIC,
+      total           NUMERIC,
+      tipo_servicio   TEXT,
+      fecha_entrega   TEXT,
+      direccion       TEXT,
+      comuna          TEXT,
+      status          TEXT DEFAULT 'pendiente',
+      created_at      TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS catalog_fields (
+      id         TEXT PRIMARY KEY,
+      field_key  TEXT UNIQUE NOT NULL,
+      label      TEXT,
+      field_type TEXT DEFAULT 'text',
+      options    TEXT,
+      required   BOOLEAN DEFAULT FALSE,
+      ord        INTEGER DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS products (
+      id           TEXT PRIMARY KEY,
+      name         TEXT NOT NULL,
+      description  TEXT,
+      category     TEXT,
+      brand        TEXT,
+      unit         TEXT DEFAULT 'un',
+      price_normal NUMERIC DEFAULT 0,
+      price_offer  NUMERIC,
+      stock        INTEGER DEFAULT 0,
+      photo_url    TEXT,
+      active       BOOLEAN DEFAULT TRUE,
+      created_at   TIMESTAMPTZ DEFAULT NOW(),
+      updated_at   TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS product_values (
+      id          TEXT PRIMARY KEY,
+      product_id  TEXT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+      field_key   TEXT NOT NULL,
+      field_value TEXT,
+      UNIQUE(product_id, field_key)
+    );
+
+    CREATE TABLE IF NOT EXISTS price_lists (
+      id           TEXT PRIMARY KEY,
+      name         TEXT NOT NULL,
+      description  TEXT,
+      discount_pct NUMERIC DEFAULT 0,
+      active       BOOLEAN DEFAULT TRUE,
+      created_at   TIMESTAMPTZ DEFAULT NOW(),
+      updated_at   TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS price_list_items (
+      id            TEXT PRIMARY KEY,
+      price_list_id TEXT NOT NULL REFERENCES price_lists(id) ON DELETE CASCADE,
+      product_id    TEXT REFERENCES products(id) ON DELETE CASCADE,
+      product_name  TEXT,
+      base_price    NUMERIC DEFAULT 0,
+      discount_pct  NUMERIC DEFAULT 0,
+      final_price   NUMERIC DEFAULT 0,
+      price_mode    TEXT DEFAULT 'discount',
+      updated_at    TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS price_list_assignments (
+      id            TEXT PRIMARY KEY,
+      price_list_id TEXT NOT NULL REFERENCES price_lists(id) ON DELETE CASCADE,
+      lead_id       TEXT REFERENCES leads(id) ON DELETE CASCADE,
+      created_at    TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS catalog_match_jobs (
+      id         TEXT PRIMARY KEY,
+      brand      TEXT,
+      file_name  TEXT,
+      total_rows INTEGER DEFAULT 0,
+      status     TEXT DEFAULT 'pending',
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS catalog_match_items (
+      id                 TEXT PRIMARY KEY,
+      job_id             TEXT NOT NULL REFERENCES catalog_match_jobs(id) ON DELETE CASCADE,
+      raw_code           TEXT,
+      raw_description    TEXT,
+      raw_medida         TEXT,
+      raw_diametro       TEXT,
+      raw_modelo         TEXT,
+      raw_marca          TEXT,
+      raw_price          NUMERIC,
+      matched_product_id TEXT REFERENCES products(id) ON DELETE SET NULL,
+      match_type         TEXT,
+      confidence         NUMERIC,
+      status             TEXT DEFAULT 'pending',
+      created_at         TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS product_families (
+      id              TEXT PRIMARY KEY,
+      brand           TEXT NOT NULL,
+      familia         TEXT NOT NULL,
+      modelo          TEXT,
+      description     TEXT,
+      caracteristicas TEXT,
+      beneficios      TEXT,
+      etiquetas       TEXT,
+      created_at      TIMESTAMPTZ DEFAULT NOW(),
+      updated_at      TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE(brand, familia, modelo)
+    );
+
+    CREATE TABLE IF NOT EXISTS family_photos (
+      id         TEXT PRIMARY KEY,
+      family_id  TEXT NOT NULL REFERENCES product_families(id) ON DELETE CASCADE,
+      photo_type TEXT DEFAULT 'extra',
+      photo_url  TEXT,
+      ord        INTEGER DEFAULT 0,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS oem_codes (
+      code        TEXT PRIMARY KEY,
+      brand_oem   TEXT,
+      brand_car   TEXT,
+      description TEXT,
+      logo_url    TEXT,
+      created_at  TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS workshops (
+      id                  TEXT PRIMARY KEY,
+      razon_social        TEXT,
+      nombre_comercial    TEXT NOT NULL,
+      rut                 TEXT,
+      encargado_nombre    TEXT,
+      encargado_email     TEXT,
+      encargado_phone     TEXT,
+      finanzas_nombre     TEXT,
+      finanzas_email      TEXT,
+      finanzas_phone      TEXT,
+      direccion           TEXT,
+      comuna              TEXT,
+      comunas_adicionales TEXT,
+      latitud             NUMERIC,
+      longitud            NUMERIC,
+      maps_url            TEXT,
+      puestos             INTEGER DEFAULT 1,
+      turnos_por_puesto   INTEGER DEFAULT 1,
+      aro_min             INTEGER DEFAULT 13,
+      aro_max             INTEGER DEFAULT 22,
+      instala_runflat     BOOLEAN DEFAULT FALSE,
+      tipos_vehiculo      TEXT,
+      marcas_neumaticos   TEXT,
+      todas_marcas        BOOLEAN DEFAULT TRUE,
+      active              BOOLEAN DEFAULT TRUE,
+      created_at          TIMESTAMPTZ DEFAULT NOW(),
+      updated_at          TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS workshop_schedules (
+      id          TEXT PRIMARY KEY,
+      workshop_id TEXT NOT NULL REFERENCES workshops(id) ON DELETE CASCADE,
+      dia         INTEGER,
+      activo      BOOLEAN DEFAULT TRUE,
+      hora_inicio TEXT,
+      hora_fin    TEXT,
+      horas       INTEGER DEFAULT 8
+    );
+
+    CREATE TABLE IF NOT EXISTS workshop_services (
+      id          TEXT PRIMARY KEY,
+      workshop_id TEXT NOT NULL REFERENCES workshops(id) ON DELETE CASCADE,
+      nombre      TEXT,
+      descripcion TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS workshop_prices (
+      id          TEXT PRIMARY KEY,
+      workshop_id TEXT NOT NULL REFERENCES workshops(id) ON DELETE CASCADE,
+      tipo        TEXT,
+      descripcion TEXT,
+      aro_min     INTEGER,
+      aro_max     INTEGER,
+      precio      NUMERIC
+    );
+
+    CREATE TABLE IF NOT EXISTS workshop_appointments (
+      id          TEXT PRIMARY KEY,
+      workshop_id TEXT REFERENCES workshops(id) ON DELETE SET NULL,
+      lead_id     TEXT REFERENCES leads(id) ON DELETE SET NULL,
+      fecha       DATE,
+      hora        TEXT,
+      puesto      INTEGER,
+      notas       TEXT,
+      order_id    TEXT,
+      created_at  TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS delivery_rules (
+      id             TEXT PRIMARY KEY,
+      tipo           TEXT NOT NULL,
+      codigo         TEXT NOT NULL,
+      nombre         TEXT,
+      horas_entrega  INTEGER,
+      notas          TEXT,
+      activo         BOOLEAN DEFAULT TRUE,
+      updated_at     TIMESTAMPTZ DEFAULT NOW(),
+      UNIQUE(tipo, codigo)
+    );
+
+    CREATE TABLE IF NOT EXISTS delivery_config (
+      key        TEXT PRIMARY KEY,
+      value      TEXT,
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_leads_status        ON leads(status);
+    CREATE INDEX IF NOT EXISTS idx_leads_channel       ON leads(channel);
+    CREATE INDEX IF NOT EXISTS idx_activities_lead     ON activities(lead_id);
+    CREATE INDEX IF NOT EXISTS idx_tasks_lead          ON tasks(lead_id);
+    CREATE INDEX IF NOT EXISTS idx_product_values_prod ON product_values(product_id);
+    CREATE INDEX IF NOT EXISTS idx_quote_items_quote   ON quote_items(quote_id);
   `);
+
+  // Seed admin user if no users exist
+  const { rows: userRows } = await query('SELECT COUNT(*) as count FROM users');
+  if (parseInt(userRows[0].count) === 0) {
+    await query(
+      `INSERT INTO users (name, email, password_hash, role)
+       VALUES ('Admin', 'admin@leadflow.com', crypt('admin123', gen_salt('bf')), 'admin')`
+    );
+    console.log('Usuario admin creado: admin@leadflow.com / admin123');
+  }
 
   const { rows } = await query('SELECT COUNT(*) as count FROM leads');
   if (parseInt(rows[0].count) === 0) await seedData();
@@ -116,8 +404,8 @@ async function seedData() {
     if (!firstLeadId) firstLeadId = id;
     await query(
       `INSERT INTO leads (id, name, last_name, company, email, phone, channel, status, priority, estimated_value, notes, agent)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-      [id, l.name, l.company, l.email, l.phone, l.channel, l.status, l.priority, l.estimated_value, l.notes, l.agent]
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+      [id, l.name, l.last_name||null, l.company, l.email, l.phone, l.channel, l.status, l.priority, l.estimated_value, l.notes, l.agent]
     );
   }
 
