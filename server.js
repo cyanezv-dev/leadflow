@@ -1875,7 +1875,7 @@ app.post('/api/competitor-prices/scrape-batch', asyncHandler(async (req, res) =>
 }));
 
 // ── CATÁLOGO ──────────────────────────────────────────────────
-app.get('/api/catalog', asyncHandler(async (req, res) => {
+async function handleCatalogList(req, res) {
   const { search, category, active = 'true', page = 1, limit = 50 } = req.query;
   const pageNum = Math.max(1, parseInt(String(page), 10) || 1);
   const limitNum = Math.min(200, Math.max(1, parseInt(String(limit), 10) || 50));
@@ -1886,8 +1886,18 @@ app.get('/api/catalog', asyncHandler(async (req, res) => {
   let i = 2;
 
   if (search) {
-    where += ` AND (p.name ILIKE $${i} OR p.brand ILIKE $${i} OR p.description ILIKE $${i})`;
-    params.push('%' + search + '%');
+    const term = '%' + String(search).trim() + '%';
+    const hasDims = req.query.ancho || req.query.perfil || req.query.aro;
+    if (!hasDims) {
+      where += ` AND (
+        p.name ILIKE $${i} OR p.brand ILIKE $${i} OR p.description ILIKE $${i}
+        OR EXISTS (SELECT 1 FROM product_values pv_s WHERE pv_s.product_id = p.id AND pv_s.field_key = 'medida' AND pv_s.field_value ILIKE $${i})
+        OR EXISTS (SELECT 1 FROM product_values pv_a WHERE pv_a.product_id = p.id AND pv_a.field_key = 'ancho' AND pv_a.field_value ILIKE $${i})
+      )`;
+    } else {
+      where += ` AND (p.name ILIKE $${i} OR p.brand ILIKE $${i} OR p.description ILIKE $${i})`;
+    }
+    params.push(term);
     i++;
   }
   if (category) {
@@ -1978,7 +1988,11 @@ app.get('/api/catalog', asyncHandler(async (req, res) => {
     limit: limitNum,
     pages: Math.ceil(total / limitNum) || 0
   });
-}));
+}
+
+app.get('/api/catalog', asyncHandler(handleCatalogList));
+app.get('/catalog', asyncHandler(handleCatalogList));
+
 app.get('/api/catalog/fields', asyncHandler(async (req, res) => {
   const { rows } = await query('SELECT * FROM catalog_fields ORDER BY ord ASC');
   res.json(rows);
@@ -2145,11 +2159,11 @@ app.get('/api/catalog/filter-options', asyncHandler(async (req, res) => {
   });
 }));
 
-/** Medidas distintas del catálogo (para ecommerce / filtros). `q` opcional ILIKE, `limit` máx. 500. */
-app.get('/api/catalog/medidas', asyncHandler(async (req, res) => {
+/** Medidas distintas del catálogo activo. `q` opcional (substring ILIKE), `limit` hasta 500. */
+async function handleCatalogMedidas(req, res) {
   const q = String(req.query.q || '').trim();
-  let limit = parseInt(String(req.query.limit || '250'), 10);
-  if (Number.isNaN(limit) || limit < 10) limit = 250;
+  let limit = parseInt(String(req.query.limit ?? '500'), 10);
+  if (Number.isNaN(limit) || limit < 1) limit = 500;
   if (limit > 500) limit = 500;
   const params = [];
   const activeClause = 'COALESCE(p.active, true) = true';
@@ -2183,7 +2197,10 @@ app.get('/api/catalog/medidas', asyncHandler(async (req, res) => {
   sql += ` ORDER BY medida ASC LIMIT ${limit}`;
   const { rows } = await query(sql, params);
   res.json({ medidas: rows.map((r) => r.medida).filter(Boolean) });
-}));
+}
+
+app.get('/api/catalog/medidas', asyncHandler(handleCatalogMedidas));
+app.get('/catalog/medidas', asyncHandler(handleCatalogMedidas));
 
 
 app.get('/api/catalog/:id', asyncHandler(async (req, res) => {
