@@ -1,0 +1,15 @@
+[submodule "frontend"]
+	path = frontend
+	url = https://github.com/cyanezv-dev/leadflow-frontend.git
+[submodule "agente-neumaticos"]
+	path = agente-neumaticos
+	url = https://github.com/cyanezv-dev/agente-neumaticos.git
+[submodule "backend"]
+	path = backend
+	url = https://github.com/cyanezv-dev/leadflow.git
+[submodule "ecommercecrm"]
+	path = ecommercecrm
+	url = https://github.com/cyanezv-dev/ecommercecrm.git
+[submodule "pdf-service"]
+	path = pdf-service
+	url = https://github.com/cyanezv-dev/pdf-service.git
