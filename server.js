@@ -1992,6 +1992,9 @@ async function handleCatalogList(req, res) {
 
 app.get('/api/catalog', asyncHandler(handleCatalogList));
 app.get('/catalog', asyncHandler(handleCatalogList));
+// Debe ir antes de /api/catalog/:id para que "medidas" no se interprete como id.
+app.get('/api/catalog/medidas', asyncHandler(handleCatalogMedidas));
+app.get('/catalog/medidas', asyncHandler(handleCatalogMedidas));
 
 app.get('/api/catalog/fields', asyncHandler(async (req, res) => {
   const { rows } = await query('SELECT * FROM catalog_fields ORDER BY ord ASC');
@@ -2198,10 +2201,6 @@ async function handleCatalogMedidas(req, res) {
   const { rows } = await query(sql, params);
   res.json({ medidas: rows.map((r) => r.medida).filter(Boolean) });
 }
-
-app.get('/api/catalog/medidas', asyncHandler(handleCatalogMedidas));
-app.get('/catalog/medidas', asyncHandler(handleCatalogMedidas));
-
 
 app.get('/api/catalog/:id', asyncHandler(async (req, res) => {
   const { rows: [product] } = await query('SELECT * FROM products WHERE id = $1', [req.params.id]);
