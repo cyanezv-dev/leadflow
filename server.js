@@ -387,7 +387,7 @@ async function initDB() {
   await query(`
     CREATE TABLE IF NOT EXISTS inventory_sources (
       id                   TEXT PRIMARY KEY DEFAULT gen_random_uuid()::TEXT,
-      product_id           TEXT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+      product_id           TEXT NOT NULL,
       tipo                 TEXT NOT NULL,
       nombre               TEXT NOT NULL,
       ubicacion            TEXT,
@@ -401,7 +401,7 @@ async function initDB() {
       permite_retiro       BOOLEAN DEFAULT FALSE,
       permite_despacho     BOOLEAN DEFAULT TRUE,
       activo               BOOLEAN DEFAULT TRUE,
-      workshop_id          TEXT REFERENCES workshops(id) ON DELETE SET NULL,
+      workshop_id          TEXT,
       notas                TEXT,
       created_at           TIMESTAMPTZ DEFAULT NOW(),
       updated_at           TIMESTAMPTZ DEFAULT NOW()
@@ -444,7 +444,7 @@ async function initDB() {
   await query(`
     CREATE TABLE IF NOT EXISTS competitor_prices (
       id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      product_id   UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+      product_id   TEXT NOT NULL,
       competitor   TEXT NOT NULL,
       price        NUMERIC,
       url          TEXT,
@@ -703,8 +703,9 @@ app.post('/api/leads/:id/notes', asyncHandler(async (req, res) => {
 initDB().then(() => {
   app.listen(PORT, () => console.log(`LeadFlow API en puerto ${PORT} [${process.env.NODE_ENV || 'development'}]`));
 }).catch(err => {
-  console.error('Error al iniciar:', err);
-  process.exit(1);
+  console.error('Error en migraciones DB (no crítico):', err.message);
+  // Intentar levantar el servidor de todas formas
+  app.listen(PORT, () => console.log(`LeadFlow API en puerto ${PORT} [modo degradado]`));
 });
 
 // ── AUTH ─────────────────────────────────────────────────────
@@ -844,6 +845,78 @@ app.put('/api/settings', asyncHandler(async (req, res) => {
   res.json({ success: true });
 }));
 
+/**
+ * Marca del ecommerce (público). Orden: `site_brand_*` en settings → datos empresa (`company_*`) → env.
+ * Keys: site_brand_name, site_brand_logo_url, site_brand_legal_name, site_brand_favicon_url,
+ *       company_name, company_logo_url, company_favicon_url
+ * Env: SITE_BRAND_NAME, SITE_BRAND_LOGO_URL, SITE_BRAND_LEGAL_NAME, SITE_BRAND_FAVICON_URL
+ *
+ *   POST   /api/site-brand/logo     multipart `logo`
+ *   POST   /api/site-brand/favicon  multipart `favicon` (.ico/.png/.svg/.webp, máx. 512KB)
+ *   PUT    /api/site-brand          JSON { name?, legalName?, logoUrl?, faviconUrl? }
+ *   DELETE /api/site-brand/logo | /api/site-brand/favicon
+ */
+app.get('/api/site-brand', asyncHandler(async (req, res) => {
+  const envBase = (process.env.BASE_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
+  /** Origen público del request (útil para armar URLs de /uploads/ cuando BASE_URL no coincide con el host real). */
+  const forwardedHost = (req.get('x-forwarded-host') || '').split(',')[0].trim();
+  const forwardedProto = (req.get('x-forwarded-proto') || '').split(',')[0].trim();
+  const host = forwardedHost || req.get('host') || '';
+  const proto = forwardedProto || req.protocol || 'http';
+  const requestOrigin = host ? `${proto}://${host}`.replace(/\/$/, '') : '';
+  const base = envBase;
+  let name = process.env.SITE_BRAND_NAME || 'TireMax';
+  let logoUrl = (process.env.SITE_BRAND_LOGO_URL || '').trim() || null;
+  let legalName = process.env.SITE_BRAND_LEGAL_NAME || 'TireMax SpA';
+  let faviconUrl = (process.env.SITE_BRAND_FAVICON_URL || '').trim() || null;
+  try {
+    const { rows } = await query(
+      `SELECT key, value FROM settings WHERE key IN (
+        'site_brand_name','site_brand_logo_url','site_brand_legal_name','site_brand_favicon_url',
+        'company_name','company_logo_url','company_favicon_url'
+      )`
+    );
+    const m = {};
+    rows.forEach((r) => { m[r.key] = r.value; });
+
+    const siteName = m.site_brand_name != null ? String(m.site_brand_name).trim() : '';
+    const companyName = m.company_name != null ? String(m.company_name).trim() : '';
+    if (siteName) name = siteName;
+    else if (companyName) name = companyName;
+
+    if (m.site_brand_legal_name != null && String(m.site_brand_legal_name).trim() !== '')
+      legalName = String(m.site_brand_legal_name).trim();
+
+    const rawSiteLogo = m.site_brand_logo_url != null ? String(m.site_brand_logo_url).trim() : '';
+    const rawCompanyLogo = m.company_logo_url != null ? String(m.company_logo_url).trim() : '';
+    if (rawSiteLogo) logoUrl = rawSiteLogo;
+    else if (rawCompanyLogo) logoUrl = rawCompanyLogo;
+
+    const rawSiteFav = m.site_brand_favicon_url != null ? String(m.site_brand_favicon_url).trim() : '';
+    const rawCompanyFav = m.company_favicon_url != null ? String(m.company_favicon_url).trim() : '';
+    if (rawSiteFav) faviconUrl = rawSiteFav;
+    else if (rawCompanyFav) faviconUrl = rawCompanyFav;
+  } catch (e) {
+    console.warn('[site-brand]', e.message);
+  }
+  const abs = (u) => {
+    if (u == null) return null;
+    const s = String(u).trim();
+    if (!s) return null;
+    if (s.startsWith('/') && !s.startsWith('//')) {
+      const root = requestOrigin || base;
+      return root + s;
+    }
+    return s;
+  };
+  res.json({
+    name,
+    logoUrl: abs(logoUrl),
+    legalName,
+    faviconUrl: abs(faviconUrl),
+  });
+}));
+
 // ── UPLOAD IMAGEN ─────────────────────────────────────────────
 const multer = require('multer');
 const path   = require('path');
@@ -877,11 +950,121 @@ const upload = multer({
   }
 });
 
+const storageFavicon = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, uploadsDir),
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname);
+    cb(null, 'favicon-' + Date.now() + ext);
+  },
+});
+
+const uploadFavicon = multer({
+  storage: storageFavicon,
+  limits: { fileSize: 512 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const allowed = ['.jpg', '.jpeg', '.png', '.svg', '.webp', '.ico'];
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (allowed.includes(ext)) cb(null, true);
+    else cb(new Error('Formato no permitido para favicon'));
+  },
+});
+
 app.post('/api/upload/logo', upload.single('logo'), (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No se subió ningún archivo' });
   const url = `${BASE_URL}/uploads/${req.file.filename}`;
   res.json({ url });
 });
+
+app.post('/api/upload/favicon', uploadFavicon.single('favicon'), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No se subió ningún archivo' });
+  const url = `${BASE_URL}/uploads/${req.file.filename}`;
+  res.json({ url });
+});
+
+/** Sube logo del ecommerce y lo guarda en `settings.site_brand_logo_url` (multipart campo `logo`). */
+app.post('/api/site-brand/logo', upload.single('logo'), asyncHandler(async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No se subió ningún archivo' });
+  const base = String(BASE_URL).replace(/\/$/, '');
+  const url = `${base}/uploads/${req.file.filename}`;
+  await query(
+    `INSERT INTO settings (key, value, updated_at) VALUES ('site_brand_logo_url',$1,NOW())
+     ON CONFLICT (key) DO UPDATE SET value=$1, updated_at=NOW()`,
+    [url],
+  );
+  res.json({ success: true, logoUrl: url, url });
+}));
+
+/** Sube favicon del ecommerce → `settings.site_brand_favicon_url` (multipart campo `favicon`). */
+app.post('/api/site-brand/favicon', uploadFavicon.single('favicon'), asyncHandler(async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No se subió ningún archivo' });
+  const base = String(BASE_URL).replace(/\/$/, '');
+  const url = `${base}/uploads/${req.file.filename}`;
+  await query(
+    `INSERT INTO settings (key, value, updated_at) VALUES ('site_brand_favicon_url',$1,NOW())
+     ON CONFLICT (key) DO UPDATE SET value=$1, updated_at=NOW()`,
+    [url],
+  );
+  res.json({ success: true, faviconUrl: url, url });
+}));
+
+/**
+ * Actualiza marca del ecommerce en `settings` (sin archivo).
+ * Body JSON: { name?, legalName?, logoUrl?, faviconUrl? } — URL vacía o null borra la clave correspondiente.
+ */
+app.put('/api/site-brand', asyncHandler(async (req, res) => {
+  const { name, legalName, logoUrl, faviconUrl } = req.body || {};
+  if (name !== undefined && name !== null) {
+    await query(
+      `INSERT INTO settings (key, value, updated_at) VALUES ('site_brand_name',$1,NOW())
+       ON CONFLICT (key) DO UPDATE SET value=$1, updated_at=NOW()`,
+      [String(name)],
+    );
+  }
+  if (legalName !== undefined && legalName !== null) {
+    await query(
+      `INSERT INTO settings (key, value, updated_at) VALUES ('site_brand_legal_name',$1,NOW())
+       ON CONFLICT (key) DO UPDATE SET value=$1, updated_at=NOW()`,
+      [String(legalName)],
+    );
+  }
+  if (logoUrl !== undefined) {
+    const v = logoUrl == null || String(logoUrl).trim() === '' ? '' : String(logoUrl).trim();
+    await query(
+      `INSERT INTO settings (key, value, updated_at) VALUES ('site_brand_logo_url',$1,NOW())
+       ON CONFLICT (key) DO UPDATE SET value=$1, updated_at=NOW()`,
+      [v],
+    );
+  }
+  if (faviconUrl !== undefined) {
+    const v = faviconUrl == null || String(faviconUrl).trim() === '' ? '' : String(faviconUrl).trim();
+    await query(
+      `INSERT INTO settings (key, value, updated_at) VALUES ('site_brand_favicon_url',$1,NOW())
+       ON CONFLICT (key) DO UPDATE SET value=$1, updated_at=NOW()`,
+      [v],
+    );
+  }
+  res.json({ success: true });
+}));
+
+/** Quita el logo guardado (el archivo en disco no se borra). */
+app.delete('/api/site-brand/logo', asyncHandler(async (req, res) => {
+  await query(
+    `INSERT INTO settings (key, value, updated_at) VALUES ('site_brand_logo_url',$1,NOW())
+     ON CONFLICT (key) DO UPDATE SET value=$1, updated_at=NOW()`,
+    [''],
+  );
+  res.json({ success: true });
+}));
+
+/** Quita el favicon guardado en site_brand (sigue aplicando company_favicon_url si existe). */
+app.delete('/api/site-brand/favicon', asyncHandler(async (req, res) => {
+  await query(
+    `INSERT INTO settings (key, value, updated_at) VALUES ('site_brand_favicon_url',$1,NOW())
+     ON CONFLICT (key) DO UPDATE SET value=$1, updated_at=NOW()`,
+    [''],
+  );
+  res.json({ success: true });
+}));
 
 // ── WEBHOOK AGENTE ────────────────────────────────────────────
 app.post('/api/webhook/agent', asyncHandler(async (req, res) => {
@@ -1694,7 +1877,9 @@ app.post('/api/competitor-prices/scrape-batch', asyncHandler(async (req, res) =>
 // ── CATÁLOGO ──────────────────────────────────────────────────
 app.get('/api/catalog', asyncHandler(async (req, res) => {
   const { search, category, active = 'true', page = 1, limit = 50 } = req.query;
-  const offset = (parseInt(page) - 1) * parseInt(limit);
+  const pageNum = Math.max(1, parseInt(String(page), 10) || 1);
+  const limitNum = Math.min(200, Math.max(1, parseInt(String(limit), 10) || 50));
+  const offset = (pageNum - 1) * limitNum;
 
   let where = 'WHERE p.active = $1';
   const params = [active === 'true'];
@@ -1747,7 +1932,7 @@ app.get('/api/catalog', asyncHandler(async (req, res) => {
        GROUP BY p.id 
        ORDER BY p.name ASC
        LIMIT $${i} OFFSET $${i+1}`,
-      [...params, parseInt(limit), offset]
+      [...params, limitNum, offset]
     ),
     query(
       `SELECT COUNT(DISTINCT p.id) as total FROM products p LEFT JOIN product_values pv ON pv.product_id = p.id ${where}`,
@@ -1755,7 +1940,7 @@ app.get('/api/catalog', asyncHandler(async (req, res) => {
     )
   ]);
 
-  const total = parseInt(countResult.rows[0]?.total || 0);
+  const total = parseInt(countResult.rows[0]?.total || 0, 10);
   let products = dataResult.rows;
 
   // Si se pide ?availability=true, enriquecer cada producto con fuentes de disponibilidad
@@ -1789,9 +1974,9 @@ app.get('/api/catalog', asyncHandler(async (req, res) => {
   res.json({
     products,
     total,
-    page: parseInt(page),
-    limit: parseInt(limit),
-    pages: Math.ceil(total / parseInt(limit))
+    page: pageNum,
+    limit: limitNum,
+    pages: Math.ceil(total / limitNum) || 0
   });
 }));
 app.get('/api/catalog/fields', asyncHandler(async (req, res) => {
@@ -1958,6 +2143,46 @@ app.get('/api/catalog/filter-options', asyncHandler(async (req, res) => {
     perfiles: perfiles.rows.map(r => r.val),
     aros:     aros.rows.map(r => r.val),
   });
+}));
+
+/** Medidas distintas del catálogo (para ecommerce / filtros). `q` opcional ILIKE, `limit` máx. 500. */
+app.get('/api/catalog/medidas', asyncHandler(async (req, res) => {
+  const q = String(req.query.q || '').trim();
+  let limit = parseInt(String(req.query.limit || '250'), 10);
+  if (Number.isNaN(limit) || limit < 10) limit = 250;
+  if (limit > 500) limit = 500;
+  const params = [];
+  const activeClause = 'COALESCE(p.active, true) = true';
+  let sql = `
+    WITH raw AS (
+      SELECT DISTINCT TRIM(pv.field_value) AS medida
+      FROM products p
+      INNER JOIN product_values pv ON pv.product_id = p.id AND pv.field_key = 'medida'
+      WHERE ${activeClause}
+        AND pv.field_value IS NOT NULL
+        AND TRIM(pv.field_value) <> ''
+      UNION
+      SELECT DISTINCT
+        CONCAT(TRIM(pa.field_value), '/', TRIM(pf.field_value), 'R', TRIM(ar.field_value)) AS medida
+      FROM products p
+      INNER JOIN product_values pa ON pa.product_id = p.id AND pa.field_key = 'ancho'
+      INNER JOIN product_values pf ON pf.product_id = p.id AND pf.field_key = 'perfil'
+      INNER JOIN product_values ar ON ar.product_id = p.id AND ar.field_key = 'aro'
+      WHERE ${activeClause}
+        AND pa.field_value ~ '^[0-9]+$'
+        AND pf.field_value ~ '^[0-9]+$'
+        AND ar.field_value ~ '^[0-9]+$'
+    )
+    SELECT DISTINCT medida FROM raw
+    WHERE TRIM(medida) <> ''
+  `;
+  if (q.length >= 1) {
+    params.push(`%${q}%`);
+    sql += ` AND medida ILIKE $${params.length}`;
+  }
+  sql += ` ORDER BY medida ASC LIMIT ${limit}`;
+  const { rows } = await query(sql, params);
+  res.json({ medidas: rows.map((r) => r.medida).filter(Boolean) });
 }));
 
 
