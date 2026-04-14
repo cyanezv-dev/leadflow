@@ -4018,6 +4018,7 @@ app.get('/api/attention/workshops', asyncHandler(async (req, res) => {
   const clientLat = parseFloat(lat)||null;
   const clientLng = parseFloat(lng)||null;
   const RADIO_MAX_KM = 50;
+  const comunaNombre = String(comuna || '').trim().toLowerCase();
 
   let result = workshops.map(w => {
     let cupos_disponibles = 0;
@@ -4059,6 +4060,18 @@ app.get('/api/attention/workshops', asyncHandler(async (req, res) => {
       if (!w.latitud || !w.longitud) return true; // sin coords → incluir siempre
       return w.distancia_km !== null && w.distancia_km <= RADIO_MAX_KM;
     });
+  } else if (comunaNombre) {
+    // Sin coordenadas pero con nombre de comuna → filtrar por comuna del taller
+    result = result.filter(w => {
+      const wComuna = String(w.comuna || '').trim().toLowerCase();
+      if (wComuna === comunaNombre) return true;
+      // Revisar comunas_adicionales (pipe-separated)
+      if (w.comunas_adicionales) {
+        const extras = w.comunas_adicionales.split('|').map(c => c.trim().toLowerCase());
+        if (extras.includes(comunaNombre)) return true;
+      }
+      return false;
+    });
   }
 
   // Filtrar por tipo de servicio si se solicita
@@ -4077,8 +4090,6 @@ app.get('/api/attention/workshops', asyncHandler(async (req, res) => {
   const { rows: deliveryServices } = await query(
     `SELECT * FROM delivery_services WHERE activo=true ORDER BY nombre`
   );
-
-  const comunaNombre = String(comuna || '').trim().toLowerCase();
 
   const deliverySvcs = deliveryServices.map(ds => {
     let distancia_km = null;
