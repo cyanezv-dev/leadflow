@@ -481,6 +481,162 @@ async function initDB() {
     CREATE INDEX IF NOT EXISTS idx_competitor_prices_comp    ON competitor_prices(competitor);
   `);
 
+  // ── Módulo Despachos: tablas nuevas ──────────────────────────────
+  await query(`
+    CREATE TABLE IF NOT EXISTS neumatico_dimensiones (
+      id                    TEXT PRIMARY KEY DEFAULT gen_random_uuid()::TEXT,
+      medida                VARCHAR(20) NOT NULL UNIQUE,
+      ancho_seccion_mm      INTEGER NOT NULL,
+      diametro_aro_pulgadas INTEGER NOT NULL,
+      perfil_pct            INTEGER NOT NULL,
+      diam_ext_cm           NUMERIC(6,2) NOT NULL,
+      ancho_seccion_cm      NUMERIC(6,2) NOT NULL,
+      caja_largo_cm         NUMERIC(6,2) NOT NULL,
+      caja_ancho_cm         NUMERIC(6,2) NOT NULL,
+      caja_alto_cm          NUMERIC(6,2) NOT NULL,
+      volumen_cm3           NUMERIC(12,2) NOT NULL,
+      peso_real_kg          NUMERIC(6,2) NOT NULL,
+      categoria             VARCHAR(20) NOT NULL DEFAULT 'pasajero',
+      activo                BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS courier_config (
+      id                   TEXT PRIMARY KEY DEFAULT gen_random_uuid()::TEXT,
+      codigo               VARCHAR(20) NOT NULL UNIQUE,
+      nombre               VARCHAR(100) NOT NULL,
+      factor_divisor       INTEGER NOT NULL DEFAULT 4000,
+      peso_max_kg          NUMERIC(6,2) NOT NULL DEFAULT 50,
+      dim_max_largo_cm     NUMERIC(6,2) NOT NULL DEFAULT 120,
+      dim_max_ancho_cm     NUMERIC(6,2) NOT NULL DEFAULT 80,
+      dim_max_alto_cm      NUMERIC(6,2) NOT NULL DEFAULT 80,
+      api_base_url         VARCHAR(255),
+      auth_type            VARCHAR(20),
+      api_key_env          VARCHAR(100),
+      recargo_sobredim_pct NUMERIC(5,2) DEFAULT 0,
+      acepta_neumaticos    BOOLEAN NOT NULL DEFAULT TRUE,
+      activo               BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS despacho_cotizaciones (
+      id                        TEXT PRIMARY KEY DEFAULT gen_random_uuid()::TEXT,
+      order_id                  TEXT REFERENCES orders(id),
+      quote_id                  TEXT REFERENCES quotes(id),
+      neumatico_medida          VARCHAR(20) NOT NULL,
+      courier_id                TEXT REFERENCES courier_config(id),
+      cantidad                  INTEGER NOT NULL DEFAULT 1,
+      caja_largo_cm             NUMERIC(6,2) NOT NULL,
+      caja_ancho_cm             NUMERIC(6,2) NOT NULL,
+      caja_alto_cm              NUMERIC(6,2) NOT NULL,
+      peso_real_total_kg        NUMERIC(8,2) NOT NULL,
+      peso_volumetrico_kg       NUMERIC(8,2) NOT NULL,
+      peso_cobrable_kg          NUMERIC(8,2) NOT NULL,
+      comuna_origen             VARCHAR(100),
+      comuna_destino            VARCHAR(100),
+      codigo_cobertura_origen   VARCHAR(20),
+      codigo_cobertura_destino  VARCHAR(20),
+      tarifa_neta               NUMERIC(10,2),
+      tarifa_iva                NUMERIC(10,2),
+      tarifa_total              NUMERIC(10,2),
+      servicio_tipo             VARCHAR(50),
+      cotizado_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      expira_at                 TIMESTAMPTZ
+    )
+  `);
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS despachos (
+      id                    TEXT PRIMARY KEY DEFAULT gen_random_uuid()::TEXT,
+      cotizacion_id         TEXT REFERENCES despacho_cotizaciones(id),
+      order_id              TEXT REFERENCES orders(id),
+      courier_id            TEXT REFERENCES courier_config(id),
+      orden_transporte_num  VARCHAR(50),
+      tracking_numero       VARCHAR(50),
+      estado                VARCHAR(30) NOT NULL DEFAULT 'PENDIENTE',
+      etiqueta_url          VARCHAR(500),
+      costo_final           NUMERIC(10,2),
+      nombre_destinatario   VARCHAR(200),
+      telefono_destinatario VARCHAR(20),
+      direccion_destino     TEXT,
+      comuna_destino        VARCHAR(100),
+      created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS despacho_tracking (
+      id             TEXT PRIMARY KEY DEFAULT gen_random_uuid()::TEXT,
+      despacho_id    TEXT NOT NULL REFERENCES despachos(id),
+      estado_courier VARCHAR(100),
+      estado_interno VARCHAR(30),
+      descripcion    TEXT,
+      ubicacion      VARCHAR(200),
+      evento_at      TIMESTAMPTZ NOT NULL,
+      registrado_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  // Columnas nuevas en orders para vincular despacho
+  await query(`
+    ALTER TABLE orders
+      ADD COLUMN IF NOT EXISTS despacho_id TEXT REFERENCES despachos(id)
+  `);
+
+  // Seed courier_config si está vacía
+  const { rowCount: courierCount } = await query('SELECT 1 FROM courier_config LIMIT 1');
+  if (!courierCount) {
+    await query(`
+      INSERT INTO courier_config
+        (codigo, nombre, factor_divisor, peso_max_kg,
+         dim_max_largo_cm, dim_max_ancho_cm, dim_max_alto_cm,
+         api_base_url, auth_type, api_key_env, acepta_neumaticos)
+      VALUES
+        ('CHILEXPRESS','Chilexpress',      4000,50,120,80, 80, 'https://services.wschilexpress.com','API_KEY','CHILEXPRESS_API_KEY',TRUE),
+        ('STARKEN',    'Starken',          4000,50,120,80, 80, 'https://gateway.starken.cl',        'API_KEY','STARKEN_API_KEY',    TRUE),
+        ('BLUEX',      'Blue Express',     4000,50,120,80, 80, 'https://www.blue.cl/api',           'API_KEY','BLUEX_API_KEY',      TRUE),
+        ('CORREOS',    'Correos de Chile', 4000,50,200,200,100,'https://apib2bv2.correos.cl:8000',  'BASIC',  'CORREOS_USER',       TRUE),
+        ('ENVIAME',    'Envíame',          4000,70,200,200,200,'https://api.enviame.io',            'API_KEY','ENVIAME_API_KEY',    TRUE)
+      ON CONFLICT (codigo) DO NOTHING
+    `);
+  }
+
+  // Seed neumatico_dimensiones si está vacía
+  const { rowCount: dimCount } = await query('SELECT 1 FROM neumatico_dimensiones LIMIT 1');
+  if (!dimCount) {
+    await query(`
+      INSERT INTO neumatico_dimensiones
+        (medida, ancho_seccion_mm, diametro_aro_pulgadas, perfil_pct,
+         diam_ext_cm, ancho_seccion_cm, caja_largo_cm, caja_ancho_cm, caja_alto_cm,
+         volumen_cm3, peso_real_kg, categoria)
+      VALUES
+        ('175/70R13',175,13,70, 56.9,17.5, 56.9, 56.9,17.5,  56615.0, 7.5,'pasajero'),
+        ('185/65R15',185,15,65, 62.1,18.5, 62.1, 62.1,18.5,  71345.0, 8.5,'pasajero'),
+        ('195/65R15',195,15,65, 63.5,19.5, 63.5, 63.5,19.5,  78588.0, 8.8,'pasajero'),
+        ('205/55R16',205,16,55, 63.2,20.5, 63.2, 63.2,20.5,  81945.0, 9.5,'pasajero'),
+        ('205/60R16',205,16,60, 64.7,20.5, 64.7, 64.7,20.5,  85924.0, 9.8,'pasajero'),
+        ('215/55R17',215,17,55, 66.2,21.5, 66.2, 66.2,21.5,  94246.0,10.2,'pasajero'),
+        ('225/45R17',225,17,45, 63.2,22.5, 63.2, 63.2,22.5,  89906.0,10.0,'pasajero'),
+        ('225/50R17',225,17,50, 65.2,22.5, 65.2, 65.2,22.5,  95563.0,10.5,'pasajero'),
+        ('235/55R17',235,17,55, 68.3,23.5, 68.3, 68.3,23.5, 109593.0,11.5,'pasajero'),
+        ('245/45R18',245,18,45, 67.2,24.5, 67.2, 67.2,24.5, 110668.0,11.8,'pasajero'),
+        ('235/75R15',235,15,75, 69.3,23.5, 69.3, 69.3,23.5, 112849.0,13.5,'camioneta'),
+        ('245/70R16',245,16,70, 72.2,24.5, 72.2, 72.2,24.5, 127648.0,14.5,'camioneta'),
+        ('245/75R16',245,16,75, 77.4,24.5, 77.4, 77.4,24.5, 146812.0,15.0,'camioneta'),
+        ('265/65R17',265,17,65, 76.3,26.5, 76.3, 76.3,26.5, 154039.0,16.0,'camioneta'),
+        ('265/70R17',265,17,70, 80.3,26.5, 80.3, 80.3,26.5, 170878.0,17.0,'camioneta'),
+        ('275/65R18',275,18,65, 80.8,27.5, 80.8, 80.8,27.5, 179640.0,18.5,'camioneta'),
+        ('285/70R17',285,17,70, 83.0,28.5, 83.0, 83.0,28.5, 196880.0,19.0,'camioneta')
+      ON CONFLICT (medida) DO NOTHING
+    `);
+  }
+
   // Seed admin user if no users exist
   const { rows: userRows } = await query('SELECT COUNT(*) as count FROM users');
   if (parseInt(userRows[0].count) === 0) {
@@ -4104,3 +4260,393 @@ app.get('/api/delivery-rules/lookup', asyncHandler(async (req, res) => {
 
   res.json({ horas_entrega: null, source: 'no_encontrado' });
 }));
+
+// ═══════════════════════════════════════════════════════════════════
+// ═══ MÓDULO DESPACHOS — VolumetricEngine ═══════════════════════════
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * Calcula las dimensiones de la caja contenedora y pesos para N neumáticos.
+ * Estrategia: posición acostada, apilado en pares (2×2 grilla para qty=4).
+ */
+function calcularCajaYPesos(dim, qty, factorDivisor = 4000) {
+  const largo_u = parseFloat(dim.caja_largo_cm);
+  const ancho_u = parseFloat(dim.caja_ancho_cm);
+  const alto_u  = parseFloat(dim.caja_alto_cm);
+  const peso_u  = parseFloat(dim.peso_real_kg);
+
+  let largo, ancho, alto;
+
+  if (qty === 1) {
+    largo = largo_u; ancho = ancho_u; alto = alto_u;
+  } else if (qty === 2) {
+    largo = largo_u; ancho = ancho_u; alto = alto_u * 2;
+  } else if (qty === 3) {
+    largo = largo_u; ancho = ancho_u; alto = alto_u * 3;
+  } else if (qty === 4) {
+    largo = largo_u * 2; ancho = ancho_u; alto = alto_u * 2;
+  } else {
+    const filas    = Math.ceil(qty / 2);
+    const columnas = qty >= 2 ? 2 : 1;
+    largo = largo_u * columnas; ancho = ancho_u; alto = alto_u * filas;
+  }
+
+  const volumenCm3       = largo * ancho * alto;
+  const pesoRealTotal    = parseFloat((peso_u * qty).toFixed(2));
+  const pesoVolumetrico  = parseFloat((volumenCm3 / factorDivisor).toFixed(2));
+  const pesoCobrable     = Math.max(pesoRealTotal, pesoVolumetrico);
+
+  return {
+    caja_largo_cm:       parseFloat(largo.toFixed(2)),
+    caja_ancho_cm:       parseFloat(ancho.toFixed(2)),
+    caja_alto_cm:        parseFloat(alto.toFixed(2)),
+    volumen_cm3:         parseFloat(volumenCm3.toFixed(2)),
+    peso_real_total_kg:  pesoRealTotal,
+    peso_volumetrico_kg: pesoVolumetrico,
+    peso_cobrable_kg:    parseFloat(pesoCobrable.toFixed(2)),
+    factor_divisor:      factorDivisor,
+  };
+}
+
+/**
+ * Valida si las dimensiones calculadas superan los límites del courier.
+ */
+function validarLimitesCourier(caja, courierCfg) {
+  const { peso_cobrable_kg, caja_largo_cm, caja_ancho_cm, caja_alto_cm } = caja;
+  const { peso_max_kg, dim_max_largo_cm, dim_max_ancho_cm, dim_max_alto_cm, nombre } = courierCfg;
+  if (peso_cobrable_kg > parseFloat(peso_max_kg))
+    return { valido: false, motivo: `Peso cobrable ${peso_cobrable_kg} kg supera máximo de ${nombre} (${peso_max_kg} kg)` };
+  if (caja_largo_cm > parseFloat(dim_max_largo_cm))
+    return { valido: false, motivo: `Largo ${caja_largo_cm} cm supera máximo de ${nombre} (${dim_max_largo_cm} cm)` };
+  if (caja_ancho_cm > parseFloat(dim_max_ancho_cm))
+    return { valido: false, motivo: `Ancho ${caja_ancho_cm} cm supera máximo de ${nombre} (${dim_max_ancho_cm} cm)` };
+  if (caja_alto_cm > parseFloat(dim_max_alto_cm))
+    return { valido: false, motivo: `Alto ${caja_alto_cm} cm supera máximo de ${nombre} (${dim_max_alto_cm} cm)` };
+  return { valido: true, motivo: null };
+}
+
+// ── CATÁLOGO DE MEDIDAS ───────────────────────────────────────────
+
+// GET /api/despachos/neumaticos/dimensiones
+app.get('/api/despachos/neumaticos/dimensiones', asyncHandler(async (req, res) => {
+  const { categoria, activo = 'true' } = req.query;
+  let q = 'SELECT * FROM neumatico_dimensiones WHERE activo = $1';
+  const params = [activo === 'true'];
+  if (categoria) { q += ' AND categoria = $2'; params.push(categoria); }
+  q += ' ORDER BY categoria, ancho_seccion_mm, diametro_aro_pulgadas';
+  const { rows } = await query(q, params);
+  res.json({ success: true, data: rows, total: rows.length });
+}));
+
+// POST /api/despachos/neumaticos/dimensiones
+app.post('/api/despachos/neumaticos/dimensiones', asyncHandler(async (req, res) => {
+  const {
+    medida, ancho_seccion_mm, diametro_aro_pulgadas, perfil_pct,
+    diam_ext_cm, ancho_seccion_cm, caja_largo_cm, caja_ancho_cm, caja_alto_cm,
+    volumen_cm3, peso_real_kg, categoria = 'pasajero'
+  } = req.body;
+  if (!medida) return res.status(400).json({ success: false, error: 'medida es requerida' });
+  const { rows: [row] } = await query(`
+    INSERT INTO neumatico_dimensiones
+      (medida, ancho_seccion_mm, diametro_aro_pulgadas, perfil_pct,
+       diam_ext_cm, ancho_seccion_cm, caja_largo_cm, caja_ancho_cm, caja_alto_cm,
+       volumen_cm3, peso_real_kg, categoria)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+    ON CONFLICT (medida) DO UPDATE SET
+      ancho_seccion_mm=$2, diametro_aro_pulgadas=$3, perfil_pct=$4,
+      diam_ext_cm=$5, ancho_seccion_cm=$6, caja_largo_cm=$7, caja_ancho_cm=$8,
+      caja_alto_cm=$9, volumen_cm3=$10, peso_real_kg=$11, categoria=$12, updated_at=NOW()
+    RETURNING *`,
+    [medida, ancho_seccion_mm, diametro_aro_pulgadas, perfil_pct,
+     diam_ext_cm, ancho_seccion_cm, caja_largo_cm, caja_ancho_cm, caja_alto_cm,
+     volumen_cm3, peso_real_kg, categoria]
+  );
+  res.status(201).json({ success: true, data: row });
+}));
+
+// ── COURIERS ──────────────────────────────────────────────────────
+
+// GET /api/despachos/couriers
+app.get('/api/despachos/couriers', asyncHandler(async (req, res) => {
+  const { rows } = await query(`
+    SELECT id, codigo, nombre, factor_divisor, peso_max_kg,
+           dim_max_largo_cm, dim_max_ancho_cm, dim_max_alto_cm,
+           api_base_url, auth_type, api_key_env,
+           recargo_sobredim_pct, acepta_neumaticos, activo, created_at
+    FROM courier_config
+    ORDER BY nombre
+  `);
+  res.json({ success: true, data: rows });
+}));
+
+// PUT /api/despachos/couriers/:id
+app.put('/api/despachos/couriers/:id', asyncHandler(async (req, res) => {
+  const {
+    nombre, factor_divisor, peso_max_kg,
+    dim_max_largo_cm, dim_max_ancho_cm, dim_max_alto_cm,
+    api_base_url, auth_type, api_key_env,
+    recargo_sobredim_pct, acepta_neumaticos, activo
+  } = req.body;
+  const { rows: [row] } = await query(`
+    UPDATE courier_config SET
+      nombre=$2, factor_divisor=$3, peso_max_kg=$4,
+      dim_max_largo_cm=$5, dim_max_ancho_cm=$6, dim_max_alto_cm=$7,
+      api_base_url=$8, auth_type=$9, api_key_env=$10,
+      recargo_sobredim_pct=$11, acepta_neumaticos=$12, activo=$13
+    WHERE id=$1 RETURNING *`,
+    [req.params.id, nombre, factor_divisor, peso_max_kg,
+     dim_max_largo_cm, dim_max_ancho_cm, dim_max_alto_cm,
+     api_base_url, auth_type, api_key_env,
+     recargo_sobredim_pct, acepta_neumaticos !== false, activo !== false]
+  );
+  if (!row) return res.status(404).json({ success: false, error: 'Courier no encontrado' });
+  res.json({ success: true, data: row });
+}));
+
+// ── CÁLCULO DE CAJA ───────────────────────────────────────────────
+
+// POST /api/despachos/calcular-caja
+app.post('/api/despachos/calcular-caja', asyncHandler(async (req, res) => {
+  const { medida, cantidad = 1, courier_codigo = 'CHILEXPRESS' } = req.body;
+  if (!medida) return res.status(400).json({ success: false, error: 'medida es requerida' });
+
+  const { rows: [dimRow] } = await query(
+    'SELECT * FROM neumatico_dimensiones WHERE medida = $1 AND activo = TRUE', [medida]
+  );
+  if (!dimRow) return res.status(404).json({ success: false, error: `Medida ${medida} no encontrada en catálogo` });
+
+  const { rows: [courierRow] } = await query(
+    'SELECT * FROM courier_config WHERE codigo = $1 AND activo = TRUE', [courier_codigo]
+  );
+  const factorDivisor = courierRow ? parseInt(courierRow.factor_divisor) : 4000;
+
+  const caja = calcularCajaYPesos(dimRow, parseInt(cantidad), factorDivisor);
+  const validacion = courierRow ? validarLimitesCourier(caja, courierRow) : { valido: true, motivo: null };
+
+  res.json({
+    success: true,
+    data: {
+      medida,
+      cantidad: parseInt(cantidad),
+      courier: courier_codigo,
+      ...caja,
+      valido_para_courier: validacion.valido,
+      motivo_invalido:     validacion.motivo,
+      neumatico_detalle:   dimRow,
+    }
+  });
+}));
+
+// ── COTIZACIÓN DE DESPACHO ────────────────────────────────────────
+
+// POST /api/despachos/cotizar
+app.post('/api/despachos/cotizar', asyncHandler(async (req, res) => {
+  const {
+    medida, cantidad = 1,
+    comuna_origen, comuna_destino,
+    courier_codigo,
+    order_id, quote_id
+  } = req.body;
+
+  if (!medida || !comuna_origen || !comuna_destino)
+    return res.status(400).json({ success: false, error: 'medida, comuna_origen y comuna_destino son requeridos' });
+
+  const { rows: [dimRow] } = await query(
+    'SELECT * FROM neumatico_dimensiones WHERE medida = $1 AND activo = TRUE', [medida]
+  );
+  if (!dimRow) return res.status(404).json({ success: false, error: `Medida ${medida} no encontrada` });
+
+  let courierQ = 'SELECT * FROM courier_config WHERE activo = TRUE AND acepta_neumaticos = TRUE';
+  const courierParams = [];
+  if (courier_codigo) { courierQ += ' AND codigo = $1'; courierParams.push(courier_codigo); }
+  const { rows: couriers } = await query(courierQ, courierParams);
+
+  const resultados = [];
+  for (const courier of couriers) {
+    const caja      = calcularCajaYPesos(dimRow, parseInt(cantidad), parseInt(courier.factor_divisor));
+    const validacion = validarLimitesCourier(caja, courier);
+
+    const { rows: [cotRow] } = await query(`
+      INSERT INTO despacho_cotizaciones
+        (order_id, quote_id, neumatico_medida, courier_id, cantidad,
+         caja_largo_cm, caja_ancho_cm, caja_alto_cm,
+         peso_real_total_kg, peso_volumetrico_kg, peso_cobrable_kg,
+         comuna_origen, comuna_destino, servicio_tipo)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'ESTANDAR')
+      RETURNING id`,
+      [order_id||null, quote_id||null, medida, courier.id, parseInt(cantidad),
+       caja.caja_largo_cm, caja.caja_ancho_cm, caja.caja_alto_cm,
+       caja.peso_real_total_kg, caja.peso_volumetrico_kg, caja.peso_cobrable_kg,
+       comuna_origen, comuna_destino]
+    );
+
+    resultados.push({
+      cotizacion_id:   cotRow.id,
+      courier_codigo:  courier.codigo,
+      courier_nombre:  courier.nombre,
+      disponible:      validacion.valido,
+      motivo_no_disp:  validacion.motivo,
+      caja,
+      tarifa_total:    null,
+      tarifa_pendiente: true,
+    });
+  }
+
+  res.json({ success: true, data: resultados, total: resultados.length });
+}));
+
+// GET /api/despachos/cotizaciones
+app.get('/api/despachos/cotizaciones', asyncHandler(async (req, res) => {
+  const { order_id, quote_id, limit = 20 } = req.query;
+  let q = `SELECT dc.*, cc.nombre as courier_nombre, cc.codigo as courier_codigo
+           FROM despacho_cotizaciones dc
+           LEFT JOIN courier_config cc ON dc.courier_id = cc.id
+           WHERE 1=1`;
+  const params = [];
+  let i = 1;
+  if (order_id) { q += ` AND dc.order_id = $${i++}`; params.push(order_id); }
+  if (quote_id) { q += ` AND dc.quote_id = $${i++}`; params.push(quote_id); }
+  q += ` ORDER BY dc.cotizado_at DESC LIMIT $${i}`;
+  params.push(parseInt(limit));
+  const { rows } = await query(q, params);
+  res.json({ success: true, data: rows });
+}));
+
+// ── CREAR DESPACHO ────────────────────────────────────────────────
+
+// POST /api/despachos/crear
+app.post('/api/despachos/crear', asyncHandler(async (req, res) => {
+  const {
+    cotizacion_id,
+    nombre_destinatario, telefono_destinatario,
+    direccion_destino, comuna_destino,
+    order_id
+  } = req.body;
+
+  if (!cotizacion_id)
+    return res.status(400).json({ success: false, error: 'cotizacion_id es requerido' });
+
+  const { rows: [cot] } = await query(
+    `SELECT dc.*, cc.nombre as courier_nombre
+     FROM despacho_cotizaciones dc
+     JOIN courier_config cc ON dc.courier_id = cc.id
+     WHERE dc.id = $1`,
+    [cotizacion_id]
+  );
+  if (!cot) return res.status(404).json({ success: false, error: 'Cotización no encontrada' });
+
+  const { rows: [despacho] } = await query(`
+    INSERT INTO despachos
+      (cotizacion_id, order_id, courier_id, estado,
+       nombre_destinatario, telefono_destinatario, direccion_destino, comuna_destino,
+       costo_final)
+    VALUES ($1,$2,$3,'PENDIENTE',$4,$5,$6,$7,$8)
+    RETURNING *`,
+    [cotizacion_id, order_id||cot.order_id, cot.courier_id,
+     nombre_destinatario, telefono_destinatario, direccion_destino, comuna_destino,
+     cot.tarifa_total]
+  );
+
+  // Vincular orden si existe
+  if (despacho.order_id) {
+    await query('UPDATE orders SET despacho_id=$1 WHERE id=$2', [despacho.id, despacho.order_id]);
+  }
+
+  res.status(201).json({ success: true, data: despacho });
+}));
+
+// ── LISTADO Y DETALLE DE DESPACHOS ───────────────────────────────
+
+// GET /api/despachos
+app.get('/api/despachos', asyncHandler(async (req, res) => {
+  const { estado, order_id, limit = 50, offset = 0 } = req.query;
+  let q = `SELECT d.*, cc.nombre as courier_nombre, cc.codigo as courier_codigo
+           FROM despachos d
+           LEFT JOIN courier_config cc ON d.courier_id = cc.id
+           WHERE 1=1`;
+  const params = [];
+  let i = 1;
+  if (estado)    { q += ` AND d.estado = $${i++}`;    params.push(estado); }
+  if (order_id)  { q += ` AND d.order_id = $${i++}`;  params.push(order_id); }
+  q += ` ORDER BY d.created_at DESC LIMIT $${i++} OFFSET $${i}`;
+  params.push(parseInt(limit), parseInt(offset));
+  const { rows } = await query(q, params);
+  res.json({ success: true, data: rows, total: rows.length });
+}));
+
+// GET /api/despachos/:id
+app.get('/api/despachos/:id', asyncHandler(async (req, res) => {
+  const { rows: [despacho] } = await query(`
+    SELECT d.*, cc.nombre as courier_nombre, cc.codigo as courier_codigo
+    FROM despachos d
+    LEFT JOIN courier_config cc ON d.courier_id = cc.id
+    WHERE d.id = $1`, [req.params.id]
+  );
+  if (!despacho) return res.status(404).json({ success: false, error: 'Despacho no encontrado' });
+  res.json({ success: true, data: despacho });
+}));
+
+// PATCH /api/despachos/:id/estado
+app.patch('/api/despachos/:id/estado', asyncHandler(async (req, res) => {
+  const { estado, orden_transporte_num, tracking_numero, etiqueta_url, costo_final } = req.body;
+  const ESTADOS = ['PENDIENTE','EN_BODEGA','EN_TRANSITO','EN_REPARTO','ENTREGADO','FALLIDO','DEVUELTO'];
+  if (estado && !ESTADOS.includes(estado))
+    return res.status(400).json({ success: false, error: `Estado inválido. Válidos: ${ESTADOS.join(', ')}` });
+
+  const sets = ['updated_at=NOW()'];
+  const params = [req.params.id];
+  let i = 2;
+  if (estado)               { sets.push(`estado=$${i++}`);               params.push(estado); }
+  if (orden_transporte_num) { sets.push(`orden_transporte_num=$${i++}`);  params.push(orden_transporte_num); }
+  if (tracking_numero)      { sets.push(`tracking_numero=$${i++}`);       params.push(tracking_numero); }
+  if (etiqueta_url)         { sets.push(`etiqueta_url=$${i++}`);          params.push(etiqueta_url); }
+  if (costo_final != null)  { sets.push(`costo_final=$${i++}`);           params.push(costo_final); }
+
+  const { rows: [row] } = await query(
+    `UPDATE despachos SET ${sets.join(',')} WHERE id=$1 RETURNING *`, params
+  );
+  if (!row) return res.status(404).json({ success: false, error: 'Despacho no encontrado' });
+  res.json({ success: true, data: row });
+}));
+
+// ── TRACKING ─────────────────────────────────────────────────────
+
+// GET /api/despachos/:id/tracking
+app.get('/api/despachos/:id/tracking', asyncHandler(async (req, res) => {
+  const { rows: [despacho] } = await query(`
+    SELECT d.*, cc.nombre as courier_nombre, cc.codigo as courier_codigo
+    FROM despachos d
+    JOIN courier_config cc ON d.courier_id = cc.id
+    WHERE d.id = $1`, [req.params.id]
+  );
+  if (!despacho) return res.status(404).json({ success: false, error: 'Despacho no encontrado' });
+
+  const { rows: eventos } = await query(
+    'SELECT * FROM despacho_tracking WHERE despacho_id = $1 ORDER BY evento_at DESC',
+    [req.params.id]
+  );
+  res.json({ success: true, data: { despacho, eventos } });
+}));
+
+// POST /api/despachos/:id/tracking
+app.post('/api/despachos/:id/tracking', asyncHandler(async (req, res) => {
+  const { estado_courier, estado_interno, descripcion, ubicacion, evento_at } = req.body;
+  if (!estado_interno || !evento_at)
+    return res.status(400).json({ success: false, error: 'estado_interno y evento_at son requeridos' });
+
+  const { rows: [evento] } = await query(`
+    INSERT INTO despacho_tracking
+      (despacho_id, estado_courier, estado_interno, descripcion, ubicacion, evento_at)
+    VALUES ($1,$2,$3,$4,$5,$6)
+    RETURNING *`,
+    [req.params.id, estado_courier, estado_interno, descripcion, ubicacion, evento_at]
+  );
+
+  // Actualizar estado del despacho
+  await query('UPDATE despachos SET estado=$1, updated_at=NOW() WHERE id=$2',
+    [estado_interno, req.params.id]);
+
+  res.status(201).json({ success: true, data: evento });
+}));
+
+// ═══ FIN MÓDULO DESPACHOS ══════════════════════════════════════════
