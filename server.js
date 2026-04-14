@@ -2203,6 +2203,8 @@ async function handleCatalogMedidas(req, res) {
 }
 
 app.get('/api/catalog/:id', asyncHandler(async (req, res) => {
+  const RESERVED = ['medidas', 'fields', 'filter-options', 'template', 'import', 'normalize', 'profitability'];
+  if (RESERVED.includes(req.params.id)) return res.status(404).json({ error: 'Ruta no encontrada' });
   const { rows: [product] } = await query('SELECT * FROM products WHERE id = $1', [req.params.id]);
   if (!product) return res.status(404).json({ error: 'Producto no encontrado' });
   const { rows: values } = await query('SELECT * FROM product_values WHERE product_id = $1', [req.params.id]);
