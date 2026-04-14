@@ -3823,7 +3823,7 @@ function haversineKm(lat1, lon1, lat2, lon2) {
 }
 
 app.get('/api/attention/workshops', asyncHandler(async (req, res) => {
-  const { fecha, aro, lat, lng, tipo_servicio } = req.query;
+  const { fecha, aro, lat, lng, tipo_servicio, comuna } = req.query;
 
   const { rows: workshops } = await query(`
     SELECT w.*,
@@ -3900,23 +3900,63 @@ app.get('/api/attention/workshops', asyncHandler(async (req, res) => {
     return 0;
   });
 
-  // Agregar delivery_services si el cliente mandó coords (filtra por radio)
+  // Delivery services — filtrar por radio (si hay coords) o por comuna (nombre)
   const { rows: deliveryServices } = await query(
     `SELECT * FROM delivery_services WHERE activo=true ORDER BY nombre`
   );
 
+  const comunaNombre = String(comuna || '').trim().toLowerCase();
+
   const deliverySvcs = deliveryServices.map(ds => {
     let distancia_km = null;
-    let en_cobertura = true;
+    let en_cobertura = false;
 
     if (clientLat && clientLng && ds.lat_base && ds.lng_base) {
       distancia_km = Math.round(haversineKm(clientLat, clientLng, parseFloat(ds.lat_base), parseFloat(ds.lng_base)) * 10) / 10;
       en_cobertura = distancia_km <= (parseFloat(ds.radio_km) || 30);
+    } else if (comunaNombre && ds.comunas) {
+      // Sin coords → comparar por nombre de comuna (campo 'comunas' es pipe-separated)
+      const listaComunas = ds.comunas.split('|').map(c => c.trim().toLowerCase());
+      en_cobertura = listaComunas.includes(comunaNombre);
+    } else {
+      // Sin coordenadas ni comuna → incluir siempre (fallback)
+      en_cobertura = true;
     }
     return { ...ds, distancia_km, en_cobertura, _entity: 'delivery_service' };
   }).filter(ds => ds.en_cobertura);
 
-  res.json({ workshops: result, delivery_services: deliverySvcs, sin_talleres: result.length === 0 });
+  // Calcular qué opciones de entrega están disponibles para el cliente
+  const tieneInstalacion  = result.some(w => w.permite_instalacion !== false);
+  const tieneRetiro       = result.some(w => w.permite_retiro === true);
+  const tieneDomicilio    = deliverySvcs.length > 0;
+
+  const opciones_disponibles = ['despacho']; // despacho siempre disponible
+  if (tieneInstalacion)  opciones_disponibles.push('serviteca');
+  if (tieneRetiro)       opciones_disponibles.push('retiro_taller');
+  if (tieneDomicilio)    opciones_disponibles.push('instalacion-domicilio');
+
+  const mensajes = {};
+  if (!tieneInstalacion) {
+    mensajes.serviteca = result.length === 0
+      ? 'No hay talleres disponibles en tu área. Puedes elegir despacho a domicilio.'
+      : 'Los talleres cercanos no ofrecen instalación. Selecciona otra opción.';
+  }
+  if (!tieneRetiro) {
+    mensajes.retiro_taller = 'No hay talleres que permitan retiro en tu área.';
+  }
+  if (!tieneDomicilio) {
+    mensajes['instalacion-domicilio'] = comunaNombre
+      ? `El servicio de instalación a domicilio no cubre ${comunaNombre} aún.`
+      : 'El servicio de instalación a domicilio no está disponible en tu área.';
+  }
+
+  res.json({
+    workshops: result,
+    delivery_services: deliverySvcs,
+    sin_talleres: result.length === 0,
+    opciones_disponibles,
+    mensajes,
+  });
 }));
 
 // ── SERVICIOS DE INSTALACIÓN / DESPACHO A DOMICILIO ──────────
