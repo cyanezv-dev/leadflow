@@ -4666,4 +4666,120 @@ app.post('/api/despachos/:id/tracking', asyncHandler(async (req, res) => {
   res.status(201).json({ success: true, data: evento });
 }));
 
+// ── AUTO-GENERAR DIMENSIONES DESDE CATÁLOGO ──────────────────────
+
+/**
+ * Parsea una medida estándar de neumático (ej: "205/55R16") y calcula
+ * todas las dimensiones físicas usando las fórmulas de la industria.
+ */
+function calcularDimensionesMedida(medidaStr) {
+  const match = String(medidaStr).trim().toUpperCase()
+    .match(/^(\d{3})\s*\/\s*(\d{2,3})\s*R\s*(\d{2,3})/)
+  if (!match) return null
+
+  const ancho_mm  = parseInt(match[1])  // ej: 205
+  const perfil    = parseInt(match[2])  // ej: 55
+  const aro_pulg  = parseInt(match[3])  // ej: 16
+
+  // Altura del flanco = ancho * perfil%
+  const flanco_mm  = ancho_mm * perfil / 100
+  // Diámetro exterior = aro en mm + 2 flancos
+  const diam_mm    = aro_pulg * 25.4 + 2 * flanco_mm
+  const diam_cm    = parseFloat((diam_mm / 10).toFixed(2))
+  const ancho_cm   = parseFloat((ancho_mm / 10).toFixed(2))
+  const volumen    = parseFloat((diam_cm * diam_cm * ancho_cm).toFixed(2))
+
+  // Estimación de peso por tamaño (fórmula empírica estándar)
+  let peso_kg
+  const categoria = (ancho_mm >= 235 || (ancho_mm >= 215 && aro_pulg >= 17 && perfil >= 65))
+    ? 'camioneta' : 'pasajero'
+
+  if (categoria === 'camioneta') {
+    peso_kg = parseFloat((ancho_mm * 0.058 + aro_pulg * 0.25 - 1.5).toFixed(1))
+  } else {
+    peso_kg = parseFloat((ancho_mm * 0.040 + aro_pulg * 0.20 + 0.5).toFixed(1))
+  }
+  // Limitar a rangos razonables
+  peso_kg = Math.max(categoria === 'camioneta' ? 11 : 7, Math.min(peso_kg, categoria === 'camioneta' ? 22 : 13))
+
+  return {
+    medida:                medidaStr.trim().toUpperCase().replace(/\s/g, ''),
+    ancho_seccion_mm:      ancho_mm,
+    diametro_aro_pulgadas: aro_pulg,
+    perfil_pct:            perfil,
+    diam_ext_cm:           diam_cm,
+    ancho_seccion_cm:      ancho_cm,
+    caja_largo_cm:         diam_cm,
+    caja_ancho_cm:         diam_cm,
+    caja_alto_cm:          ancho_cm,
+    volumen_cm3:           volumen,
+    peso_real_kg:          peso_kg,
+    categoria,
+  }
+}
+
+// POST /api/despachos/neumaticos/dimensiones/auto-generar
+app.post('/api/despachos/neumaticos/dimensiones/auto-generar', asyncHandler(async (req, res) => {
+  // 1. Obtener todas las medidas únicas del catálogo de productos
+  const { rows: medRows } = await query(`
+    SELECT DISTINCT TRIM(UPPER(field_value)) as medida
+    FROM product_values
+    WHERE field_key = 'medida'
+      AND field_value IS NOT NULL
+      AND field_value <> ''
+    ORDER BY 1
+  `)
+
+  const medidas = medRows.map(r => r.medida).filter(Boolean)
+
+  if (!medidas.length) {
+    return res.json({ success: true, creadas: 0, existentes: 0, invalidas: 0, detalle: [] })
+  }
+
+  // 2. Ver cuáles ya existen
+  const { rows: existentes } = await query(`
+    SELECT medida FROM neumatico_dimensiones
+    WHERE medida = ANY($1)`, [medidas]
+  )
+  const yaExisten = new Set(existentes.map(r => r.medida))
+
+  let creadas = 0, invalidas = 0
+  const detalle = []
+
+  for (const m of medidas) {
+    if (yaExisten.has(m)) {
+      detalle.push({ medida: m, resultado: 'ya_existe' })
+      continue
+    }
+    const dim = calcularDimensionesMedida(m)
+    if (!dim) {
+      invalidas++
+      detalle.push({ medida: m, resultado: 'formato_invalido' })
+      continue
+    }
+    await query(`
+      INSERT INTO neumatico_dimensiones
+        (medida, ancho_seccion_mm, diametro_aro_pulgadas, perfil_pct,
+         diam_ext_cm, ancho_seccion_cm, caja_largo_cm, caja_ancho_cm, caja_alto_cm,
+         volumen_cm3, peso_real_kg, categoria)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+      ON CONFLICT (medida) DO NOTHING`,
+      [dim.medida, dim.ancho_seccion_mm, dim.diametro_aro_pulgadas, dim.perfil_pct,
+       dim.diam_ext_cm, dim.ancho_seccion_cm, dim.caja_largo_cm, dim.caja_ancho_cm,
+       dim.caja_alto_cm, dim.volumen_cm3, dim.peso_real_kg, dim.categoria]
+    )
+    creadas++
+    detalle.push({ medida: m, resultado: 'creada', ...dim })
+  }
+
+  res.json({
+    success:   true,
+    total:     medidas.length,
+    creadas,
+    existentes: yaExisten.size,
+    invalidas,
+    detalle,
+  })
+}));
+
 // ═══ FIN MÓDULO DESPACHOS ══════════════════════════════════════════
