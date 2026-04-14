@@ -359,6 +359,31 @@ async function initDB() {
       updated_at TIMESTAMPTZ DEFAULT NOW()
     );
 
+    -- Servicio de instalación/despacho a domicilio (entidad independiente de talleres)
+    CREATE TABLE IF NOT EXISTS delivery_services (
+      id               TEXT PRIMARY KEY,
+      nombre           TEXT NOT NULL,
+      descripcion      TEXT,
+      tipo             TEXT NOT NULL DEFAULT 'instalacion_domicilio',
+      radio_km         NUMERIC DEFAULT 30,
+      lat_base         NUMERIC,
+      lng_base         NUMERIC,
+      comunas          TEXT,
+      precio_base      NUMERIC DEFAULT 0,
+      precio_por_km    NUMERIC DEFAULT 0,
+      dias_disponibles TEXT DEFAULT 'lunes,martes,miércoles,jueves,viernes',
+      hora_inicio      TEXT DEFAULT '09:00',
+      hora_fin         TEXT DEFAULT '18:00',
+      notas            TEXT,
+      activo           BOOLEAN DEFAULT TRUE,
+      created_at       TIMESTAMPTZ DEFAULT NOW(),
+      updated_at       TIMESTAMPTZ DEFAULT NOW()
+    );
+
+    -- Columnas nuevas en workshops (permite_instalacion, permite_retiro)
+    ALTER TABLE workshops ADD COLUMN IF NOT EXISTS permite_instalacion BOOLEAN DEFAULT TRUE;
+    ALTER TABLE workshops ADD COLUMN IF NOT EXISTS permite_retiro      BOOLEAN DEFAULT FALSE;
+
     CREATE INDEX IF NOT EXISTS idx_leads_status        ON leads(status);
     CREATE INDEX IF NOT EXISTS idx_leads_channel       ON leads(channel);
     CREATE INDEX IF NOT EXISTS idx_activities_lead     ON activities(lead_id);
@@ -3403,14 +3428,15 @@ app.post('/api/workshops', asyncHandler(async (req, res) => {
   const { razon_social, nombre_comercial, rut, encargado_nombre, encargado_email, encargado_phone,
     finanzas_nombre, finanzas_email, finanzas_phone, direccion, comuna, comunas_adicionales,
     latitud, longitud, maps_url, puestos, turnos_por_puesto, aro_min, aro_max,
-    instala_runflat, tipos_vehiculo, marcas_neumaticos, todas_marcas } = req.body;
+    instala_runflat, tipos_vehiculo, marcas_neumaticos, todas_marcas,
+    permite_instalacion, permite_retiro } = req.body;
   if (!nombre_comercial) return res.status(400).json({ error: 'Nombre comercial requerido' });
   const { rows: [w] } = await query(
     `INSERT INTO workshops (id,razon_social,nombre_comercial,rut,encargado_nombre,encargado_email,
      encargado_phone,finanzas_nombre,finanzas_email,finanzas_phone,direccion,comuna,
      comunas_adicionales,latitud,longitud,maps_url,puestos,turnos_por_puesto,aro_min,aro_max,
-     instala_runflat,tipos_vehiculo,marcas_neumaticos,todas_marcas)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24) RETURNING *`,
+     instala_runflat,tipos_vehiculo,marcas_neumaticos,todas_marcas,permite_instalacion,permite_retiro)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26) RETURNING *`,
     [require('crypto').randomUUID(),razon_social||nombre_comercial,nombre_comercial,rut||null,
      encargado_nombre||null,encargado_email||null,encargado_phone||null,
      finanzas_nombre||null,finanzas_email||null,finanzas_phone||null,
@@ -3419,7 +3445,8 @@ app.post('/api/workshops', asyncHandler(async (req, res) => {
      parseInt(puestos)||1,parseInt(turnos_por_puesto)||1,
      parseInt(aro_min)||13,parseInt(aro_max)||22,
      instala_runflat||false,tipos_vehiculo||null,
-     marcas_neumaticos||null,todas_marcas!==false]
+     marcas_neumaticos||null,todas_marcas!==false,
+     permite_instalacion!==false,permite_retiro===true]
   );
   res.status(201).json(w);
 }));
@@ -3428,20 +3455,23 @@ app.put('/api/workshops/:id', asyncHandler(async (req, res) => {
   const { razon_social,nombre_comercial,rut,encargado_nombre,encargado_email,encargado_phone,
     finanzas_nombre,finanzas_email,finanzas_phone,direccion,comuna,comunas_adicionales,
     latitud,longitud,maps_url,puestos,turnos_por_puesto,aro_min,aro_max,
-    instala_runflat,tipos_vehiculo,marcas_neumaticos,todas_marcas,active } = req.body;
+    instala_runflat,tipos_vehiculo,marcas_neumaticos,todas_marcas,active,
+    permite_instalacion,permite_retiro } = req.body;
   const { rows: [w] } = await query(
     `UPDATE workshops SET razon_social=$1,nombre_comercial=$2,rut=$3,encargado_nombre=$4,
      encargado_email=$5,encargado_phone=$6,finanzas_nombre=$7,finanzas_email=$8,finanzas_phone=$9,
      direccion=$10,comuna=$11,comunas_adicionales=$12,latitud=$13,longitud=$14,maps_url=$15,
      puestos=$16,turnos_por_puesto=$17,aro_min=$18,aro_max=$19,instala_runflat=$20,
-     tipos_vehiculo=$21,marcas_neumaticos=$22,todas_marcas=$23,active=$24,updated_at=NOW()
-     WHERE id=$25 RETURNING *`,
+     tipos_vehiculo=$21,marcas_neumaticos=$22,todas_marcas=$23,active=$24,
+     permite_instalacion=$25,permite_retiro=$26,updated_at=NOW()
+     WHERE id=$27 RETURNING *`,
     [razon_social,nombre_comercial,rut||null,encargado_nombre||null,encargado_email||null,
      encargado_phone||null,finanzas_nombre||null,finanzas_email||null,finanzas_phone||null,
      direccion||null,comuna||null,comunas_adicionales||null,latitud||null,longitud||null,
      maps_url||null,parseInt(puestos)||1,parseInt(turnos_por_puesto)||1,
      parseInt(aro_min)||13,parseInt(aro_max)||22,instala_runflat||false,
-     tipos_vehiculo||null,marcas_neumaticos||null,todas_marcas!==false,active!==false,req.params.id]
+     tipos_vehiculo||null,marcas_neumaticos||null,todas_marcas!==false,active!==false,
+     permite_instalacion!==false,permite_retiro===true,req.params.id]
   );
   res.json(w);
 }));
@@ -3793,7 +3823,7 @@ function haversineKm(lat1, lon1, lat2, lon2) {
 }
 
 app.get('/api/attention/workshops', asyncHandler(async (req, res) => {
-  const { fecha, aro, lat, lng } = req.query;
+  const { fecha, aro, lat, lng, tipo_servicio } = req.query;
 
   const { rows: workshops } = await query(`
     SELECT w.*,
@@ -3814,8 +3844,9 @@ app.get('/api/attention/workshops', asyncHandler(async (req, res) => {
 
   const clientLat = parseFloat(lat)||null;
   const clientLng = parseFloat(lng)||null;
+  const RADIO_MAX_KM = 50;
 
-  const result = workshops.map(w => {
+  let result = workshops.map(w => {
     let cupos_disponibles = 0;
     let horarios_disponibles = [];
 
@@ -3833,7 +3864,6 @@ app.get('/api/attention/workshops', asyncHandler(async (req, res) => {
     const precioMontaje  = (w.prices||[]).find(p => p.tipo==='montaje'  && (!p.aro_min||aroNum>=p.aro_min) && (!p.aro_max||aroNum<=p.aro_max));
     const precioBalanceo = (w.prices||[]).find(p => p.tipo==='balanceo' && (!p.aro_min||aroNum>=p.aro_min) && (!p.aro_max||aroNum<=p.aro_max));
 
-    // Calcular distancia si hay coordenadas del cliente y del taller
     let distancia_km = null;
     if (clientLat && clientLng && w.latitud && w.longitud) {
       distancia_km = Math.round(haversineKm(clientLat, clientLng, parseFloat(w.latitud), parseFloat(w.longitud)) * 10) / 10;
@@ -3846,14 +3876,107 @@ app.get('/api/attention/workshops', asyncHandler(async (req, res) => {
       precio_montaje:  precioMontaje?.precio  || null,
       precio_balanceo: precioBalanceo?.precio || null,
       distancia_km,
+      _entity: 'workshop',
     };
-  }).sort((a,b) => {
-    // Ordenar por distancia si está disponible
+  });
+
+  // Filtrar por radio 50km si el cliente envió coordenadas
+  if (clientLat && clientLng) {
+    result = result.filter(w => {
+      if (!w.latitud || !w.longitud) return true; // sin coords → incluir siempre
+      return w.distancia_km !== null && w.distancia_km <= RADIO_MAX_KM;
+    });
+  }
+
+  // Filtrar por tipo de servicio si se solicita
+  if (tipo_servicio === 'instalacion') result = result.filter(w => w.permite_instalacion !== false);
+  if (tipo_servicio === 'retiro')      result = result.filter(w => w.permite_retiro === true);
+
+  // Ordenar por distancia
+  result.sort((a,b) => {
     if (a.distancia_km !== null && b.distancia_km !== null) return a.distancia_km - b.distancia_km;
+    if (a.distancia_km !== null) return -1;
+    if (b.distancia_km !== null) return 1;
     return 0;
   });
 
-  res.json(result);
+  // Agregar delivery_services si el cliente mandó coords (filtra por radio)
+  const { rows: deliveryServices } = await query(
+    `SELECT * FROM delivery_services WHERE activo=true ORDER BY nombre`
+  );
+
+  const deliverySvcs = deliveryServices.map(ds => {
+    let distancia_km = null;
+    let en_cobertura = true;
+
+    if (clientLat && clientLng && ds.lat_base && ds.lng_base) {
+      distancia_km = Math.round(haversineKm(clientLat, clientLng, parseFloat(ds.lat_base), parseFloat(ds.lng_base)) * 10) / 10;
+      en_cobertura = distancia_km <= (parseFloat(ds.radio_km) || 30);
+    }
+    return { ...ds, distancia_km, en_cobertura, _entity: 'delivery_service' };
+  }).filter(ds => ds.en_cobertura);
+
+  res.json({ workshops: result, delivery_services: deliverySvcs, sin_talleres: result.length === 0 });
+}));
+
+// ── SERVICIOS DE INSTALACIÓN / DESPACHO A DOMICILIO ──────────
+app.get('/api/delivery-services', asyncHandler(async (req, res) => {
+  const { activo } = req.query;
+  let q = 'SELECT * FROM delivery_services WHERE 1=1';
+  const params = [];
+  if (activo !== undefined) { q += ` AND activo=$${params.length+1}`; params.push(activo === 'true'); }
+  q += ' ORDER BY nombre';
+  const { rows } = await query(q, params);
+  res.json(rows);
+}));
+
+app.get('/api/delivery-services/:id', asyncHandler(async (req, res) => {
+  const { rows: [svc] } = await query('SELECT * FROM delivery_services WHERE id=$1', [req.params.id]);
+  if (!svc) return res.status(404).json({ error: 'Servicio no encontrado' });
+  res.json(svc);
+}));
+
+app.post('/api/delivery-services', asyncHandler(async (req, res) => {
+  const { nombre, descripcion, tipo, radio_km, lat_base, lng_base, comunas,
+          precio_base, precio_por_km, dias_disponibles, hora_inicio, hora_fin, notas } = req.body;
+  if (!nombre) return res.status(400).json({ error: 'Nombre requerido' });
+  const { rows: [svc] } = await query(
+    `INSERT INTO delivery_services
+      (id,nombre,descripcion,tipo,radio_km,lat_base,lng_base,comunas,
+       precio_base,precio_por_km,dias_disponibles,hora_inicio,hora_fin,notas)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
+    [require('crypto').randomUUID(), nombre, descripcion||null,
+     tipo||'instalacion_domicilio', parseFloat(radio_km)||30,
+     lat_base||null, lng_base||null, comunas||null,
+     parseFloat(precio_base)||0, parseFloat(precio_por_km)||0,
+     dias_disponibles||'lunes,martes,miércoles,jueves,viernes',
+     hora_inicio||'09:00', hora_fin||'18:00', notas||null]
+  );
+  res.status(201).json(svc);
+}));
+
+app.put('/api/delivery-services/:id', asyncHandler(async (req, res) => {
+  const { nombre, descripcion, tipo, radio_km, lat_base, lng_base, comunas,
+          precio_base, precio_por_km, dias_disponibles, hora_inicio, hora_fin, notas, activo } = req.body;
+  const { rows: [svc] } = await query(
+    `UPDATE delivery_services SET
+      nombre=$1, descripcion=$2, tipo=$3, radio_km=$4, lat_base=$5, lng_base=$6,
+      comunas=$7, precio_base=$8, precio_por_km=$9, dias_disponibles=$10,
+      hora_inicio=$11, hora_fin=$12, notas=$13, activo=$14, updated_at=NOW()
+     WHERE id=$15 RETURNING *`,
+    [nombre, descripcion||null, tipo||'instalacion_domicilio', parseFloat(radio_km)||30,
+     lat_base||null, lng_base||null, comunas||null,
+     parseFloat(precio_base)||0, parseFloat(precio_por_km)||0,
+     dias_disponibles||'lunes,martes,miércoles,jueves,viernes',
+     hora_inicio||'09:00', hora_fin||'18:00', notas||null,
+     activo!==false, req.params.id]
+  );
+  res.json(svc);
+}));
+
+app.delete('/api/delivery-services/:id', asyncHandler(async (req, res) => {
+  await query('DELETE FROM delivery_services WHERE id=$1', [req.params.id]);
+  res.json({ success: true });
 }));
 
 // ── CONFIGURACIÓN DE ENTREGA ─────────────────────────────────
