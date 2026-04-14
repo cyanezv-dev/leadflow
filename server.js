@@ -481,6 +481,16 @@ async function initDB() {
     CREATE INDEX IF NOT EXISTS idx_competitor_prices_comp    ON competitor_prices(competitor);
   `);
 
+  // ── Dimensiones de despacho en productos ─────────────────────────
+  await query(`
+    ALTER TABLE products
+      ADD COLUMN IF NOT EXISTS peso_kg       NUMERIC,
+      ADD COLUMN IF NOT EXISTS caja_largo_cm NUMERIC,
+      ADD COLUMN IF NOT EXISTS caja_ancho_cm NUMERIC,
+      ADD COLUMN IF NOT EXISTS caja_alto_cm  NUMERIC,
+      ADD COLUMN IF NOT EXISTS volumen_cm3   NUMERIC
+  `);
+
   // ── Módulo Despachos: tablas nuevas ──────────────────────────────
   await query(`
     CREATE TABLE IF NOT EXISTS neumatico_dimensiones (
@@ -2395,14 +2405,17 @@ app.get('/api/catalog/:id', asyncHandler(async (req, res) => {
 }));
 
 app.post('/api/catalog', asyncHandler(async (req, res) => {
-  const { name, description, category, brand, unit, price_normal, price_offer, stock, photo_url, active, custom_fields } = req.body;
+  const { name, description, category, brand, unit, price_normal, price_offer, stock, photo_url, active,
+          custom_fields, peso_kg, caja_largo_cm, caja_ancho_cm, caja_alto_cm, volumen_cm3 } = req.body;
   if (!name) return res.status(400).json({ error: 'Nombre requerido' });
   const { rows: [product] } = await query(
-    `INSERT INTO products (id,name,description,category,brand,unit,price_normal,price_offer,stock,photo_url,active)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+    `INSERT INTO products (id,name,description,category,brand,unit,price_normal,price_offer,stock,photo_url,active,
+       peso_kg,caja_largo_cm,caja_ancho_cm,caja_alto_cm,volumen_cm3)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
     [require('crypto').randomUUID(), name, description||null, category||null, brand||null,
      unit||'unidad', parseFloat(price_normal)||0, price_offer ? parseFloat(price_offer) : null,
-     parseInt(stock)||0, photo_url||null, active !== false]
+     parseInt(stock)||0, photo_url||null, active !== false,
+     peso_kg||null, caja_largo_cm||null, caja_ancho_cm||null, caja_alto_cm||null, volumen_cm3||null]
   );
   if (custom_fields) {
     for (const [key, value] of Object.entries(custom_fields)) {
@@ -2419,14 +2432,18 @@ app.post('/api/catalog', asyncHandler(async (req, res) => {
 }));
 
 app.put('/api/catalog/:id', asyncHandler(async (req, res) => {
-  const { name, description, category, brand, unit, price_normal, price_offer, stock, photo_url, active, custom_fields } = req.body;
+  const { name, description, category, brand, unit, price_normal, price_offer, stock, photo_url, active,
+          custom_fields, peso_kg, caja_largo_cm, caja_ancho_cm, caja_alto_cm, volumen_cm3 } = req.body;
   const { rows: [product] } = await query(
     `UPDATE products SET name=$1, description=$2, category=$3, brand=$4, unit=$5,
-     price_normal=$6, price_offer=$7, stock=$8, photo_url=$9, active=$10, updated_at=NOW()
-     WHERE id=$11 RETURNING *`,
+     price_normal=$6, price_offer=$7, stock=$8, photo_url=$9, active=$10,
+     peso_kg=$11, caja_largo_cm=$12, caja_ancho_cm=$13, caja_alto_cm=$14, volumen_cm3=$15,
+     updated_at=NOW() WHERE id=$16 RETURNING *`,
     [name, description||null, category||null, brand||null, unit||'unidad',
      parseFloat(price_normal)||0, price_offer ? parseFloat(price_offer) : null,
-     parseInt(stock)||0, photo_url||null, active !== false, req.params.id]
+     parseInt(stock)||0, photo_url||null, active !== false,
+     peso_kg||null, caja_largo_cm||null, caja_ancho_cm||null, caja_alto_cm||null, volumen_cm3||null,
+     req.params.id]
   );
   if (custom_fields) {
     for (const [key, value] of Object.entries(custom_fields)) {
