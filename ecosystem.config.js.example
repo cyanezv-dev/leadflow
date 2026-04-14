@@ -1,0 +1,16 @@
+// Copy this file to ecosystem.config.js and fill in the values
+module.exports = {
+  apps: [{
+    name: 'leadflow-api',
+    script: 'server.js',
+    env: {
+      PORT: 3001,
+      NODE_ENV: 'production',
+      DATABASE_URL: 'postgresql://user:password@localhost:5432/dbname',
+      GOOGLE_PLACES_API_KEY: 'your-google-places-api-key',
+      ANTHROPIC_API_KEY: 'your-anthropic-api-key',
+      BASE_URL: 'https://your-domain.com',
+      UPLOADS_DIR: '/path/to/uploads'
+    }
+  }]
+}
