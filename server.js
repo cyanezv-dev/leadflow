@@ -4721,19 +4721,30 @@ function calcularDimensionesMedida(medidaStr) {
 // POST /api/despachos/neumaticos/dimensiones/auto-generar
 app.post('/api/despachos/neumaticos/dimensiones/auto-generar', asyncHandler(async (req, res) => {
   // 1. Obtener todas las medidas únicas del catálogo de productos
+  // Buscar en múltiples field_keys posibles (medida, medida_neumatico, size, etc.)
   const { rows: medRows } = await query(`
     SELECT DISTINCT TRIM(UPPER(field_value)) as medida
     FROM product_values
-    WHERE field_key = 'medida'
+    WHERE field_key ILIKE ANY(ARRAY['medida','medida_neumatico','medida_neum','size','talla','dimensión','dimension'])
       AND field_value IS NOT NULL
       AND field_value <> ''
+      AND field_value ILIKE '%/%R%'
     ORDER BY 1
   `)
 
   const medidas = medRows.map(r => r.medida).filter(Boolean)
 
   if (!medidas.length) {
-    return res.json({ success: true, creadas: 0, existentes: 0, invalidas: 0, detalle: [] })
+    // Diagnóstico: ver qué field_keys tienen los productos
+    const { rows: keysRows } = await query(`
+      SELECT DISTINCT field_key, COUNT(*) as cnt
+      FROM product_values GROUP BY field_key ORDER BY cnt DESC LIMIT 20
+    `)
+    return res.json({
+      success: true, creadas: 0, existentes: 0, invalidas: 0, total: 0, detalle: [],
+      aviso: 'No se encontraron medidas en el catálogo. Verifica que los productos tengan un campo con la medida (ej: "205/55R16").',
+      field_keys_en_catalogo: keysRows.map(r => `${r.field_key} (${r.cnt})`),
+    })
   }
 
   // 2. Ver cuáles ya existen
